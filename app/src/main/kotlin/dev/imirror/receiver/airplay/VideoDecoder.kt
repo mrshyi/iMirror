@@ -90,6 +90,8 @@ class VideoDecoder(private val outputSurface: Surface) {
         // Provisional size for StreamingScreen aspect-fit; replaced by the decoder's reported size.
         StreamStats.videoWidth = actualWidth
         StreamStats.videoHeight = actualHeight
+        StreamStats.videoRotation = 0
+        StreamStats.videoOutputGeometry = "SPS ${actualWidth}x$actualHeight"
 
         // Create the MediaFormat that describes the H.264 stream to the hardware decoder
         val format = MediaFormat.createVideoFormat(
@@ -243,18 +245,42 @@ class VideoDecoder(private val outputSurface: Surface) {
         }
     }
 
-    /** Reads the decoder's true display size (honouring the crop rectangle) for StreamingScreen. */
+    /** Reads the decoder's visible display size (crop + rotation) for StreamingScreen. */
     private fun publishOutputSize(format: MediaFormat) {
-        var w = format.getInteger(MediaFormat.KEY_WIDTH)
-        var h = format.getInteger(MediaFormat.KEY_HEIGHT)
-        if (format.containsKey("crop-left") && format.containsKey("crop-right")) {
+        val rawWidth = format.getInteger(MediaFormat.KEY_WIDTH)
+        val rawHeight = format.getInteger(MediaFormat.KEY_HEIGHT)
+        var w = rawWidth
+        var h = rawHeight
+        val hasCropHorizontal = format.containsKey("crop-left") && format.containsKey("crop-right")
+        val hasCropVertical = format.containsKey("crop-top") && format.containsKey("crop-bottom")
+        if (hasCropHorizontal) {
             w = format.getInteger("crop-right") - format.getInteger("crop-left") + 1
+        }
+        if (hasCropVertical) {
             h = format.getInteger("crop-bottom") - format.getInteger("crop-top") + 1
         }
         if (isPlausibleSize(w, h)) {
-            StreamStats.videoWidth = w
-            StreamStats.videoHeight = h
-            Logger.i("Video output size ${w}x$h")
+            val rotation = if (format.containsKey(MediaFormat.KEY_ROTATION)) {
+                ((format.getInteger(MediaFormat.KEY_ROTATION) % 360) + 360) % 360
+            } else {
+                0
+            }
+            // The crop rectangle is defined before rotation; StreamingScreen needs the final display ratio.
+            val (displayWidth, displayHeight) = if (rotation == 90 || rotation == 270) h to w else w to h
+            StreamStats.videoWidth = displayWidth
+            StreamStats.videoHeight = displayHeight
+            StreamStats.videoRotation = rotation
+            val cropLeft = if (hasCropHorizontal) format.getInteger("crop-left") else 0
+            val cropTop = if (hasCropVertical) format.getInteger("crop-top") else 0
+            val cropRight = if (hasCropHorizontal) format.getInteger("crop-right") else rawWidth - 1
+            val cropBottom = if (hasCropVertical) format.getInteger("crop-bottom") else rawHeight - 1
+            StreamStats.videoOutputGeometry =
+                "${rawWidth}x$rawHeight [$cropLeft,$cropTop-$cropRight,$cropBottom]"
+            Logger.i(
+                "Video output raw=${rawWidth}x${rawHeight}, crop=" +
+                    "$cropLeft,$cropTop-$cropRight,$cropBottom, " +
+                    "rotation=${rotation}°, display=${displayWidth}x$displayHeight"
+            )
         }
     }
 

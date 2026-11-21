@@ -25,6 +25,9 @@ object StreamStats {
     // StreamingScreen reads these to aspect-fit the Surface instead of stretching to 16:9.
     @Volatile var videoWidth = 0
     @Volatile var videoHeight = 0
+    @Volatile var videoRotation = 0
+    @Volatile var videoOutputGeometry = "—"
+    @Volatile var surfaceSize = "—"
 
     // ─── Audio (AudioStreamServer) ───────────────────────────────────────────
     @Volatile var audioActive = false  // true while an audio stream is running
@@ -34,7 +37,8 @@ object StreamStats {
     /** Clears per-stream counters (call when a mirror session ends). Keeps [overlayEnabled]. */
     fun resetStreams() {
         videoRes = ""; videoFps = 0; videoQueue = 0; videoDropPct = 0
-        videoWidth = 0; videoHeight = 0
+        videoWidth = 0; videoHeight = 0; videoRotation = 0
+        videoOutputGeometry = "—"; surfaceSize = "—"
         audioActive = false; audioQueue = 0; audioDupPct = 0
     }
 
@@ -42,5 +46,8 @@ object StreamStats {
     fun summary(): String =
         "iMirror · debug\n" +
         "VIDEO  ${videoRes.ifEmpty { "—" }}   ${videoFps} fps   q ${videoQueue}   drop ${videoDropPct}%\n" +
+        "OUTPUT ${videoWidth}x${videoHeight}   rot ${videoRotation}°\n" +
+        "GEOM   $videoOutputGeometry\n" +
+        "SURFACE $surfaceSize\n" +
         "AUDIO  " + (if (audioActive) "on   q ${audioQueue}   dup ${audioDupPct}%" else "off")
 }

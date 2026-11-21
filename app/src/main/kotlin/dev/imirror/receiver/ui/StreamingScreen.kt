@@ -67,6 +67,7 @@ class StreamingScreen @JvmOverloads constructor(
     private val tick = object : Runnable {
         override fun run() {
             applyAspectFit()
+            StreamStats.surfaceSize = "${surfaceView.width}x${surfaceView.height}"
             if (StreamStats.overlayEnabled) {
                 debugView.visibility = VISIBLE
                 debugView.text = StreamStats.summary()
