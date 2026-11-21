@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.provider.Settings
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import dev.imirror.receiver.MainActivity
@@ -135,6 +136,10 @@ class MirrorService : Service() {
 
     private fun bringStreamingScreenToFront() {
         if (videoSurfaceProvider?.invoke() != null) return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && !Settings.canDrawOverlays(this)) {
+            Logger.w("Video sender connected in background; grant 'Display over other apps' to show video automatically")
+            return
+        }
         val intent = Intent(this, MainActivity::class.java).addFlags(
             Intent.FLAG_ACTIVITY_NEW_TASK or
                 Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or

@@ -442,7 +442,7 @@ class AirPlayReceiver(
         // AirPlay 2 NTP is receiver-initiated: poll the sender's timing port so macOS proceeds.
         val ntp = AirPlayNtpClient(remoteAddress, senderTimingPort).also { ntpClient = it; it.start(scope) }
         onSenderNameChanged("AirPlay")
-        onVideoSessionChanged(false)
+        onVideoSessionChanged(true) // AirPlay 2 mirror setup always requires a video Surface.
         emitState(ProtocolState.CONNECTED)
         Logger.i("Mirror keys set; eventPort=${event.localPort} timingPort=${ntp.localPort}")
         return event.localPort to ntp.localPort
@@ -461,8 +461,6 @@ class AirPlayReceiver(
         mirrorServer = server
         videoPlaying = true
         emitNowPlaying()
-        onVideoSessionChanged(true)
-        emitState(ProtocolState.CONNECTED)
         server.start(scope)
         return server.dataPort.also { Logger.i("Mirror data server started on port $it") }
     }
@@ -495,7 +493,6 @@ class AirPlayReceiver(
         mirrorServer?.stop()
         mirrorServer = null
         videoPlaying = false
-        onVideoSessionChanged(false)
         emitNowPlaying()   // audio may still be playing → now-playing card can take over
         Logger.i("Mirror video stream stopped (audio playback continues)")
     }
