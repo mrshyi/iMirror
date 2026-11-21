@@ -149,13 +149,16 @@ class AirPlayReceiver(
     fun start() {
         Logger.i("AirPlayReceiver starting (displayName='$displayName')")
         scope.launch {
-            try {
-                startTimingHandler()
-                startMdnsService()
-                startRtspHandler()
-            } catch (e: Exception) {
-                Logger.e("Failed to start AirPlayReceiver", e)
-                emitState(ProtocolState.ERROR)
+            synchronized(this@AirPlayReceiver) {
+                if (!job.isActive) return@launch
+                try {
+                    startTimingHandler()
+                    startMdnsService()
+                    startRtspHandler()
+                } catch (e: Exception) {
+                    Logger.e("Failed to start AirPlayReceiver", e)
+                    emitState(ProtocolState.ERROR)
+                }
             }
         }
     }
@@ -168,8 +171,10 @@ class AirPlayReceiver(
      *
      * MUST be called when [MirrorService] stops or is destroyed.
      */
+    @Synchronized
     fun stop() {
         Logger.i("AirPlayReceiver stopping")
+        scope.cancel()
         try {
             rtspHandler?.stop()
             timingHandler?.stop()
@@ -178,8 +183,6 @@ class AirPlayReceiver(
             releaseMediaComponents()
         } catch (e: Exception) {
             Logger.e("Error during AirPlayReceiver stop", e)
-        } finally {
-            scope.cancel()
         }
     }
 
@@ -295,13 +298,9 @@ class AirPlayReceiver(
     private fun onStreamingStopped() {
         Logger.i("Streaming stopped — releasing media components")
         releaseMediaComponents()
-        emitState(ProtocolState.ADVERTISING)
-
         scope.launch {
-            try {
-                mdnsService?.restart(displayName.ifBlank { null })
-            } catch (e: Exception) {
-                Logger.e("Failed to restart mDNS after streaming", e)
+            synchronized(this@AirPlayReceiver) {
+                if (job.isActive) mdnsService?.restart(displayName.ifBlank { null })
             }
         }
     }

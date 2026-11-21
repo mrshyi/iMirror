@@ -177,7 +177,7 @@ class SettingsFragment : Fragment() {
     private fun setupListeners() {
         rowDisplayName.setOnClickListener { showDisplayNameDialog() }
 
-        setToggleListener(rowAirPlay)      { enabled -> save { it.copy(airPlayEnabled = enabled) } }
+        setToggleListener(rowAirPlay)      { enabled -> saveAndRestart { it.copy(airPlayEnabled = enabled) } }
         setToggleListener(rowMirrorAudio)  { enabled -> saveAndRestart { it.copy(mirrorAudioEnabled = enabled) } }
         setToggleListener(rowPinAuth)      { enabled -> saveAndRestart { it.copy(airPlayPinAuthEnabled = enabled) } }
         setToggleListener(rowStartOnBoot)  { enabled -> save { it.copy(startOnBoot = enabled) } }
@@ -205,7 +205,10 @@ class SettingsFragment : Fragment() {
      */
     private fun save(transform: (AppSettings) -> AppSettings) {
         viewLifecycleOwner.lifecycleScope.launch {
-            settingsRepository.update(transform)
+            if (!settingsRepository.update(transform)) {
+                populateUI(settingsRepository.settingsFlow.first())
+                return@launch
+            }
             Logger.d("Settings saved")
         }
     }
@@ -216,7 +219,10 @@ class SettingsFragment : Fragment() {
      */
     private fun saveAndRestart(transform: (AppSettings) -> AppSettings) {
         viewLifecycleOwner.lifecycleScope.launch {
-            settingsRepository.update(transform)
+            if (!settingsRepository.update(transform)) {
+                populateUI(settingsRepository.settingsFlow.first())
+                return@launch
+            }
             ServiceController.restart(requireContext())
             Logger.i("Settings saved — restarting receivers to apply")
         }
@@ -281,10 +287,14 @@ class SettingsFragment : Fragment() {
      */
     private fun resetSettings() {
         viewLifecycleOwner.lifecycleScope.launch {
-            settingsRepository.resetToDefaults()
+            if (!settingsRepository.resetToDefaults()) {
+                populateUI(settingsRepository.settingsFlow.first())
+                return@launch
+            }
+            ServiceController.restart(requireContext())
             val defaults = AppSettings.DEFAULT
             populateUI(defaults)
-            Logger.i("Settings reset to defaults")
+            Logger.i("Settings reset to defaults and receiver restarted")
         }
     }
 }

@@ -124,13 +124,29 @@ Senders: **iPhone**, **iPad**, and **Mac** running macOS 12 or newer.
 
 ## Build from source
 
-Requires JDK 17+, and an Android SDK with NDK `28.2.13676358` and CMake 3.22.1.
+On x86_64 Linux, use JDK 17, Android SDK Platform 35, Build Tools 34.0.0,
+NDK `28.2.13676358`, and CMake `3.22.1`.
 
 ```sh
-git clone https://github.com/prat3ik/iMirror.git
+git clone https://github.com/mrshyi/iMirror.git
 cd iMirror
 ./gradlew assembleDebug
 ```
+
+Gradle writes the ABI-specific and universal debug APKs to
+`app/build/outputs/apk/debug/`. For a 32-bit ARM Android TV, use
+`app-armeabi-v7a-debug.apk`.
+
+On ARM64 Linux, use the **Android debug APK (armeabi-v7a)** workflow in GitHub
+Actions. Its x86_64 Ubuntu runner runs Google's Linux host tools and
+cross-compiles the native libraries for the TV. Pushes and pull requests
+trigger the build, and you can also select **Run workflow** in the Actions tab.
+Download `imirror-armeabi-v7a-debug-<event>-<commit>` from the run's
+**Artifacts** section; it contains the APK and the exact source revision archive.
+The APK also bundles third-party license and attribution files. Treat artifacts
+from pull requests as untrusted test builds; prefer runs from a trusted branch.
+CI checks the APK's native libraries. TV installation and mirroring require
+separate device testing.
 
 For a signed release build, supply your own keystore via `KEYSTORE_PATH`,
 `KEYSTORE_PASSWORD`, `KEY_ALIAS` and `KEY_PASSWORD`.

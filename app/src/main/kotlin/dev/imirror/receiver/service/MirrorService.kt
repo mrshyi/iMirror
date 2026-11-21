@@ -7,10 +7,11 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.os.Binder
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import dev.imirror.receiver.MainActivity
 import dev.imirror.receiver.R
 import android.view.Surface
@@ -20,8 +21,9 @@ import dev.imirror.receiver.settings.SettingsRepository
 import dev.imirror.receiver.util.Logger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -31,11 +33,11 @@ import kotlinx.coroutines.launch
 /**
  * MirrorService — Android ForegroundService that hosts all receiver protocols.
  *
- * WHY: The AirPlay/Miracast/Cast receivers need to run continuously in the background.
+ * The AirPlay receiver needs to advertise and accept connections in the background.
  * Android may kill background processes. A ForegroundService with a persistent
  * notification keeps the app alive and shows the user that iMirror is active.
  *
- * HOW: Bind to this service from [MainActivity] to receive state updates.
+ * The UI observes [runningService] for state updates.
  * Use [ServiceController] to send start/stop/restart commands.
  *
  * Service lifecycle:
@@ -49,14 +51,12 @@ import kotlinx.coroutines.launch
  */
 class MirrorService : Service() {
 
-    // Binder for Activity binding (returns this service directly)
-    private val binder = LocalBinder()
-
     // Coroutine scope — cancelled in onDestroy() to clean up all coroutines
     private val serviceJob = SupervisorJob()
-    private val serviceScope = CoroutineScope(Dispatchers.IO + serviceJob)
+    private val serviceScope = CoroutineScope(Dispatchers.Main + serviceJob)
+    private var receiverCommand: Job? = null
 
-    // Observable state — Activities and Fragments observe this via the binder
+    // Observable receiver state
     private val _serviceState = MutableStateFlow<ServiceState>(ServiceState.Stopped)
     val serviceState: StateFlow<ServiceState> = _serviceState.asStateFlow()
 
@@ -77,7 +77,7 @@ class MirrorService : Service() {
     private val _pairingPin = MutableStateFlow<String?>(null)
     val pairingPin: StateFlow<String?> = _pairingPin.asStateFlow()
 
-    // Surface provider — supplied by MainActivity after binding (Sprint 5).
+    // Surface provider supplied by the visible Activity.
     // The lambda captures this field so it always uses the latest provider even if
     // setVideoSurfaceProvider() is called after startAirPlay().
     @Volatile private var videoSurfaceProvider: (() -> Surface?)? = null
@@ -98,63 +98,61 @@ class MirrorService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Promote to foreground immediately with a persistent notification
-        startForeground(NOTIFICATION_ID, buildNotification(isRunning = false))
-
-        when (intent?.action) {
-            ACTION_START   -> serviceScope.launch { startReceivers() }
-            ACTION_STOP    -> serviceScope.launch { stopReceivers(); stopSelf() }
-            ACTION_RESTART -> serviceScope.launch { restartReceivers() }
-            else           -> serviceScope.launch { startReceivers() } // default: start
+        if (intent?.action == ACTION_STOP) {
+            stopSelfResult(startId)
+            return START_NOT_STICKY
         }
 
-        // START_STICKY: if the system kills the service, restart it with a null intent
+        if (_runningService.value !== this) {
+            ServiceCompat.startForeground(
+                this,
+                NOTIFICATION_ID,
+                buildNotification(isRunning = false),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+            )
+            _runningService.value = this
+        }
+
+        if (intent?.action == ACTION_RESTART) {
+            receiverCommand?.cancel()
+            receiverCommand = serviceScope.launch { restartReceivers() }
+        } else if (receiverCommand?.isActive != true && _serviceState.value != ServiceState.Running) {
+            receiverCommand = serviceScope.launch { startReceivers() }
+        }
+
         return START_STICKY
     }
 
-    override fun onBind(intent: Intent?): IBinder = binder
+    override fun onBind(intent: Intent?): IBinder? = null
 
-    /**
-     * The app was swiped away from recents. Cleanly stop all receivers (which closes the RTSP
-     * connection so an active mirror ends on the sender too) and stop the service — don't let
-     * START_STICKY silently resurrect it as a zombie that keeps advertising/streaming invisibly.
-     */
-    override fun onTaskRemoved(rootIntent: Intent?) {
-        Logger.i("App task removed — stopping receivers + service")
-        stopReceivers()
-        stopSelf()
-        super.onTaskRemoved(rootIntent)
-    }
-
-    /**
-     * Called by [MainActivity] after it binds, to supply the [Surface] for video rendering.
-     *
-     * The lambda is invoked lazily — only when a stream is actually being started — so it
-     * is safe to call this before or after [startAirPlay]. The lambda should return null
-     * if the Activity's StreamingScreen is not yet available (e.g., surface not yet created).
-     *
-     * Call with `{ null }` (or simply don't call) during Activity destruction so we stop
-     * holding a reference to the Activity's Surface after the window is gone.
-     *
-     * @param provider Lambda that returns the current [Surface], or null if unavailable.
-     */
     fun setVideoSurfaceProvider(provider: () -> Surface?) {
         videoSurfaceProvider = provider
     }
 
-    /**
-     * Sends a DACP transport command (TV remote → AirPlay sender), e.g. play/pause or skip what the
-     * Mac/iPhone is streaming. Bound Activities call this from media-key events. No-op if no AirPlay
-     * sender has advertised a DACP identity.
-     */
+    fun clearVideoSurfaceProvider(provider: () -> Surface?) {
+        if (videoSurfaceProvider === provider) videoSurfaceProvider = null
+    }
+
+    /** Requests an in-process restart when the foreground service is already running. */
+    fun requestRestart() {
+        serviceScope.launch {
+            receiverCommand?.cancel()
+            receiverCommand = launch { restartReceivers() }
+        }
+    }
+
+    /** Sends a DACP transport command from the TV to the AirPlay sender. */
     fun sendAirPlayRemoteCommand(command: String) {
         airPlayReceiver?.sendRemoteCommand(command)
     }
 
     override fun onDestroy() {
         Logger.i("MirrorService destroying")
-        stopAllReceiversInternal()
         serviceJob.cancel()
+        videoSurfaceProvider = null
+        if (_runningService.value === this) _runningService.value = null
+        stopAllReceiversInternal()
+        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         super.onDestroy()
     }
 
@@ -163,8 +161,7 @@ class MirrorService : Service() {
     /**
      * Starts all receivers that are enabled in Settings.
      *
-     * Reads current settings, then starts AirPlay, Miracast, and/or Cast
-     * receivers according to the enabled flags.
+     * Reads current settings and starts AirPlay when enabled.
      */
     private suspend fun startReceivers() {
         val settings = settingsRepository.settingsFlow.first()
@@ -177,18 +174,6 @@ class MirrorService : Service() {
     }
 
     /**
-     * Stops all active receivers and updates the service state to Stopped.
-     * Does NOT call stopSelf() — use [ACTION_STOP] for that.
-     */
-    private fun stopReceivers() {
-        Logger.i("Stopping all receivers")
-        stopAllReceiversInternal()
-        _serviceState.value = ServiceState.Stopped
-        _activeConnection.value = null
-        updateNotification(isRunning = false)
-    }
-
-    /**
      * Restarts all receivers: stops them, waits briefly, then starts them again.
      * Used for applying settings changes or recovering from errors.
      */
@@ -197,7 +182,7 @@ class MirrorService : Service() {
         _serviceState.value = ServiceState.Restarting
         updateNotification(isRunning = false)
         stopAllReceiversInternal()
-        kotlinx.coroutines.delay(500) // brief pause to ensure ports are released
+        delay(500) // brief pause to ensure ports are released
         startReceivers()
     }
 
@@ -210,7 +195,7 @@ class MirrorService : Service() {
      * which [MdnsService] resolves at runtime.
      *
      * Surface is not available here (it lives in the Activity/Fragment).
-     * The surface provider is wired up from [MainActivity] in Sprint 5.
+     * The surface provider is supplied by [MainActivity] while visible.
      * Until then, video frames are silently discarded and only audio plays.
      *
      * @param settings Current app settings; read once per start/restart cycle.
@@ -250,7 +235,7 @@ class MirrorService : Service() {
                     bytes = bytes.copyOf(),
                     mimeType = imageType.mimeType
                 )
-                updateNotification(isRunning = true)
+                serviceScope.launch { updateNotification(isRunning = true) }
             },
             onPhotoCleared = {
                 _photoFrame.value = null
@@ -287,6 +272,7 @@ class MirrorService : Service() {
         try { airPlayReceiver?.stop() } catch (e: Exception) { Logger.e("AirPlay stop error", e) }
         airPlayReceiver = null
         _airPlayState.value = ProtocolState.DISABLED
+        _activeConnection.value = null
         _photoFrame.value = null
         _nowPlaying.value = null
         _pairingPin.value = null
@@ -338,11 +324,13 @@ class MirrorService : Service() {
         )
 
         // "Restart" action — sends ACTION_RESTART to this service
-        val restartIntent = PendingIntent.getService(
-            this, 2,
-            Intent(this, MirrorService::class.java).apply { action = ACTION_RESTART },
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
+        val restartService = Intent(this, MirrorService::class.java).apply { action = ACTION_RESTART }
+        val restartFlags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        val restartIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            PendingIntent.getForegroundService(this, 2, restartService, restartFlags)
+        } else {
+            PendingIntent.getService(this, 2, restartService, restartFlags)
+        }
 
         val statusText = if (isRunning) R.string.notification_status_running
                          else           R.string.notification_status_stopped
@@ -352,7 +340,10 @@ class MirrorService : Service() {
             .setContentTitle(getString(R.string.app_name))
             .setContentText(notificationContentText ?: getString(statusText))
             .setContentIntent(openAppIntent)
-            .setOngoing(true)                   // Prevents user from swiping away
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
             .setCategory(Notification.CATEGORY_SERVICE)
             .addAction(R.drawable.ic_stop,    getString(R.string.action_stop),    stopIntent)
             .addAction(R.drawable.ic_restart, getString(R.string.action_restart), restartIntent)
@@ -367,20 +358,10 @@ class MirrorService : Service() {
         manager.notify(NOTIFICATION_ID, buildNotification(isRunning, contentText))
     }
 
-    // ─── Binder ─────────────────────────────────────────────────────────────
-
-    /**
-     * LocalBinder — Provides direct access to [MirrorService] for bound Activities.
-     *
-     * WHY: Binding (rather than just starting) the service gives the Activity a
-     * direct reference, so it can observe the service's StateFlows without
-     * using broadcasts or a shared ViewModel.
-     */
-    inner class LocalBinder : Binder() {
-        fun getService(): MirrorService = this@MirrorService
-    }
-
     companion object {
+        private val _runningService = MutableStateFlow<MirrorService?>(null)
+        val runningService: StateFlow<MirrorService?> = _runningService.asStateFlow()
+
         const val CHANNEL_ID      = "imirror_service_channel"
         const val NOTIFICATION_ID = 1001
         const val ACTION_START    = "dev.imirror.receiver.action.START"

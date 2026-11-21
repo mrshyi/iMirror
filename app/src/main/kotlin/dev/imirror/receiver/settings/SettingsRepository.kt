@@ -9,6 +9,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import dev.imirror.receiver.util.Logger
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
@@ -69,15 +70,19 @@ class SettingsRepository(private val context: Context) {
      *
      * @param transform A function that takes the current settings and returns the updated settings.
      */
-    suspend fun update(transform: (AppSettings) -> AppSettings) {
-        try {
+    suspend fun update(transform: (AppSettings) -> AppSettings): Boolean {
+        return try {
             context.dataStore.edit { prefs ->
                 val current = prefs.toAppSettings()
                 val updated = transform(current)
                 prefs.fromAppSettings(updated)
             }
+            true
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Logger.e("Failed to save settings to DataStore", e)
+            false
         }
     }
 
@@ -87,14 +92,18 @@ class SettingsRepository(private val context: Context) {
      * Used in "reset to defaults" functionality. This is a destructive operation —
      * all user-configured settings will be lost.
      */
-    suspend fun resetToDefaults() {
-        try {
+    suspend fun resetToDefaults(): Boolean {
+        return try {
             context.dataStore.edit { prefs ->
                 prefs.clear()
             }
             Logger.i("Settings reset to defaults")
+            true
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Logger.e("Failed to reset settings", e)
+            false
         }
     }
 
@@ -105,7 +114,7 @@ class SettingsRepository(private val context: Context) {
      * Missing keys fall back to their default values in [AppSettings].
      */
     private fun Preferences.toAppSettings(): AppSettings = AppSettings(
-        displayName        = this[Keys.DISPLAY_NAME]            ?: "Pratik AirPlay",
+        displayName        = this[Keys.DISPLAY_NAME]            ?: "",
         airPlayEnabled     = this[Keys.AIRPLAY_ENABLED]         ?: true,
         airPlayPinAuthEnabled = this[Keys.AIRPLAY_PIN_AUTH]     ?: false,
         startOnBoot        = this[Keys.START_ON_BOOT]           ?: false,

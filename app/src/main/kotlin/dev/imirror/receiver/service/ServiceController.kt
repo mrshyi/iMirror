@@ -26,9 +26,8 @@ object ServiceController {
     /**
      * Starts the MirrorService if it is not already running.
      *
-     * Uses [ContextCompat.startForegroundService] which works correctly on all
-     * Android versions (API 26+ requires the foreground service to be started
-     * this way to avoid background start restrictions).
+     * Call from a visible UI or an Android foreground-service start exemption,
+     * such as the system boot broadcast.
      *
      * @param context Any valid Android context.
      */
@@ -48,8 +47,7 @@ object ServiceController {
      */
     fun stop(context: Context) {
         Logger.i("ServiceController: stop()")
-        val intent = buildIntent(context, MirrorService.ACTION_STOP)
-        context.startService(intent)
+        context.stopService(Intent(context, MirrorService::class.java))
     }
 
     /**
@@ -66,8 +64,13 @@ object ServiceController {
      */
     fun restart(context: Context) {
         Logger.i("ServiceController: restart()")
-        val intent = buildIntent(context, MirrorService.ACTION_RESTART)
-        startForegroundServiceCompat(context, intent)
+        val runningService = MirrorService.runningService.value
+        if (runningService != null) {
+            runningService.requestRestart()
+        } else {
+            val intent = buildIntent(context, MirrorService.ACTION_RESTART)
+            startForegroundServiceCompat(context, intent)
+        }
     }
 
     /**

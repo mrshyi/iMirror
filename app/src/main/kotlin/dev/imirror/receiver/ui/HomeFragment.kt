@@ -1,28 +1,22 @@
 package dev.imirror.receiver.ui
 
-import android.content.ComponentName
-import android.content.Context
-import android.content.Intent
-import android.content.ServiceConnection
-import android.graphics.Color
 import android.os.Bundle
-import android.os.IBinder
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
-import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
 import dev.imirror.receiver.R
 import dev.imirror.receiver.service.MirrorService
-import dev.imirror.receiver.service.Protocol
 import dev.imirror.receiver.service.ProtocolState
 import dev.imirror.receiver.service.ServiceController
 import dev.imirror.receiver.service.ServiceState
 import dev.imirror.receiver.util.Logger
 import dev.imirror.receiver.util.NetworkUtils
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
@@ -33,31 +27,14 @@ import kotlinx.coroutines.launch
  * and provides Start / Stop / Restart controls. Designed for TV: large cards,
  * D-pad navigable, Google TV Streamer design language.
  *
- * HOW: Binds to [MirrorService] to receive real-time state updates.
+ * Observes [MirrorService] while the home screen is visible.
  * User interactions call [ServiceController] to send commands to the service.
  *
  * Navigation: accessed via the "Home" item in MainActivity's nav panel.
  */
 class HomeFragment : Fragment() {
 
-    // Service binding — gives direct access to MirrorService StateFlows
-    private var service: MirrorService? = null
-    private var isBound = false
-
-    private val serviceConnection = object : ServiceConnection {
-        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
-            service = (binder as? MirrorService.LocalBinder)?.getService()
-            isBound = true
-            Logger.d("HomeFragment: bound to MirrorService")
-            observeServiceState()
-        }
-
-        override fun onServiceDisconnected(name: ComponentName?) {
-            service = null
-            isBound = false
-            Logger.d("HomeFragment: unbound from MirrorService")
-        }
-    }
+    private var serviceObserver: Job? = null
 
     // View references — bound in onViewCreated
     private lateinit var textDeviceName: TextView
@@ -81,17 +58,13 @@ class HomeFragment : Fragment() {
 
     override fun onStart() {
         super.onStart()
-        // Bind to the service so we can observe its StateFlows
-        val intent = Intent(requireContext(), MirrorService::class.java)
-        requireContext().bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
+        serviceObserver = viewLifecycleOwner.lifecycleScope.launch { observeServiceState() }
     }
 
     override fun onStop() {
+        serviceObserver?.cancel()
+        serviceObserver = null
         super.onStop()
-        if (isBound) {
-            requireContext().unbindService(serviceConnection)
-            isBound = false
-        }
     }
 
     // ─── View Setup ──────────────────────────────────────────────────────────
@@ -149,19 +122,17 @@ class HomeFragment : Fragment() {
 
     // ─── State Observation ───────────────────────────────────────────────────
 
-    /**
-     * Starts collecting state updates from [MirrorService].
-     * Called after the service is bound. Each StateFlow is collected independently
-     * so that a change in one protocol card doesn't trigger a full UI redraw.
-     */
-    private fun observeServiceState() {
-        val svc = service ?: return
-
-        viewLifecycleOwner.lifecycleScope.launch {
-            svc.serviceState.collectLatest { state -> updateServiceStateBadge(state) }
-        }
-        viewLifecycleOwner.lifecycleScope.launch {
-            svc.airPlayState.collectLatest { state -> updateProtocolCard(cardAirPlay, state) }
+    private suspend fun observeServiceState() {
+        MirrorService.runningService.collectLatest { service ->
+            if (service == null) {
+                updateServiceStateBadge(ServiceState.Stopped)
+                updateProtocolCard(cardAirPlay, ProtocolState.DISABLED)
+            } else {
+                coroutineScope {
+                    launch { service.serviceState.collect { updateServiceStateBadge(it) } }
+                    launch { service.airPlayState.collect { updateProtocolCard(cardAirPlay, it) } }
+                }
+            }
         }
     }
 

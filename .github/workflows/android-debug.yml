@@ -1,0 +1,92 @@
+name: Android debug APK (armeabi-v7a)
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    env:
+      APK_PATH: app/build/outputs/apk/debug/app-armeabi-v7a-debug.apk
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK packages
+        run: |
+          test "$(uname -m)" = x86_64
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_HOME" --install \
+            "platforms;android-35" "build-tools;34.0.0" "ndk;28.2.13676358" "cmake;3.22.1"
+
+      - name: Assemble debug APKs
+        run: ./gradlew --no-daemon :app:assembleDebug
+
+      - name: Verify armeabi-v7a APK contents
+        run: |
+          python3 - "$APK_PATH" <<'PY'
+          import sys
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          apk = Path(sys.argv[1])
+          if not apk.is_file():
+              sys.exit(f"Expected APK was not created: {apk}")
+
+          with ZipFile(apk) as archive:
+              entries = {entry.filename for entry in archive.infolist()}
+              libraries = {
+                  name for name in entries
+                  if name.startswith("lib/") and name.endswith(".so")
+              }
+              required_libraries = {
+                  "lib/armeabi-v7a/libplayfair.so",
+                  "lib/armeabi-v7a/libalac.so",
+              }
+              required_notices = {
+                  "assets/licenses/Apache-2.0.txt",
+                  "assets/licenses/NOTICE.md",
+              }
+              missing = (required_libraries | required_notices) - entries
+              if missing:
+                  sys.exit(f"Missing APK files in {apk}: {', '.join(sorted(missing))}")
+              if archive.read("assets/licenses/Apache-2.0.txt") != Path("LICENSES/Apache-2.0.txt").read_bytes():
+                  sys.exit("Bundled Apache license text does not match the source license")
+              if archive.read("assets/licenses/NOTICE.md") != Path("NOTICE.md").read_bytes():
+                  sys.exit("Bundled NOTICE does not match the source notice")
+              if any(not name.startswith("lib/armeabi-v7a/") for name in libraries):
+                  sys.exit(f"Unexpected native ABI in {apk}")
+          print(f"Verified armeabi-v7a native libraries in {apk}")
+          PY
+
+      - name: Package exact source revision
+        run: |
+          mkdir -p app/build/outputs/source
+          SOURCE_ARCHIVE="app/build/outputs/source/imirror-source-${GITHUB_SHA}.tar.gz"
+          git archive --format=tar.gz --prefix="imirror-${GITHUB_SHA}/" "$GITHUB_SHA" > "$SOURCE_ARCHIVE"
+          test -s "$SOURCE_ARCHIVE"
+          echo "SOURCE_ARCHIVE=$SOURCE_ARCHIVE" >> "$GITHUB_ENV"
+
+      - name: Upload armeabi-v7a debug APK and corresponding source
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: imirror-armeabi-v7a-debug-${{ github.event_name }}-${{ github.sha }}
+          path: |
+            ${{ env.APK_PATH }}
+            ${{ env.SOURCE_ARCHIVE }}
+          if-no-files-found: error
