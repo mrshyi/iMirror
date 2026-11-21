@@ -133,6 +133,17 @@ class MirrorService : Service() {
         if (videoSurfaceProvider === provider) videoSurfaceProvider = null
     }
 
+    private fun bringStreamingScreenToFront() {
+        if (videoSurfaceProvider?.invoke() != null) return
+        val intent = Intent(this, MainActivity::class.java).addFlags(
+            Intent.FLAG_ACTIVITY_NEW_TASK or
+                Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
+                Intent.FLAG_ACTIVITY_SINGLE_TOP
+        )
+        runCatching { startActivity(intent) }
+            .onFailure { Logger.e("Could not bring MainActivity to front", it) }
+    }
+
     /** Requests an in-process restart when the foreground service is already running. */
     fun requestRestart() {
         serviceScope.launch {
@@ -216,6 +227,7 @@ class MirrorService : Service() {
         // onSenderNameChanged is called synchronously before emitState(CONNECTED), so
         // this assignment happens-before the Main-thread read in onStateChanged.
         var pendingSenderName = "AirPlay Sender"
+        var pendingHasVideo = false
 
         airPlayReceiver = AirPlayReceiver(
             context = applicationContext,
@@ -230,6 +242,7 @@ class MirrorService : Service() {
             onSenderNameChanged = { name ->
                 pendingSenderName = name.ifEmpty { "AirPlay Sender" }
             },
+            onVideoSessionChanged = { hasVideo -> pendingHasVideo = hasVideo },
             onPhotoReceived = { bytes, imageType ->
                 _photoFrame.value = PhotoFrame(
                     bytes = bytes.copyOf(),
@@ -254,10 +267,12 @@ class MirrorService : Service() {
                         _activeConnection.value =
                             ActiveConnection(pendingSenderName, Protocol.AIRPLAY)
                         updateNotification(isRunning = true, streamingSenderName = pendingSenderName)
+                        if (pendingHasVideo) bringStreamingScreenToFront()
                     }
                     ProtocolState.ADVERTISING,
                     ProtocolState.DISABLED,
                     ProtocolState.ERROR       -> {
+                        pendingHasVideo = false
                         _activeConnection.value = null
                         updateNotification(isRunning = state != ProtocolState.DISABLED &&
                                                        state != ProtocolState.ERROR)
