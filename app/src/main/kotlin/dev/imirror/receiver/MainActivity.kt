@@ -67,12 +67,14 @@ class MainActivity : AppCompatActivity() {
     private var currentNowPlaying: NowPlayingInfo? = null
     private var videoOverlayWasActive = false
     private var leavingForLauncher = false
+    private var defaultWindowAnimations = 0
 
     // Currently selected nav item index (0 = Home, 1 = Settings)
     private var selectedNavIndex = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        defaultWindowAnimations = window.attributes.windowAnimations
         setContentView(R.layout.activity_main)
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
@@ -98,6 +100,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
+        window.setWindowAnimations(defaultWindowAnimations)
         leavingForLauncher = false
         overlayObserver = lifecycleScope.launch { observeOverlayState() }
     }
@@ -111,6 +114,7 @@ class MainActivity : AppCompatActivity() {
     override fun onUserLeaveHint() {
         if (!leavingForLauncher) {
             leavingForLauncher = true
+            window.setWindowAnimations(0)
             stopVideoSessionForExit()
         }
         super.onUserLeaveHint()
@@ -290,6 +294,7 @@ class MainActivity : AppCompatActivity() {
     private fun exitToTvLauncher() {
         if (leavingForLauncher) return
         leavingForLauncher = true
+        window.setWindowAnimations(0)
         stopVideoSessionForExit()
         returnToTvLauncher()
     }
