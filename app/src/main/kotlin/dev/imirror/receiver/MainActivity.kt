@@ -1,5 +1,6 @@
 package dev.imirror.receiver
 
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -8,6 +9,7 @@ import androidx.core.content.ContextCompat
 import android.view.View
 import android.widget.FrameLayout
 import android.widget.TextView
+import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
@@ -63,6 +65,7 @@ class MainActivity : AppCompatActivity() {
     private var overlayObserver: Job? = null
     private var currentAirPlayState = ProtocolState.DISABLED
     private var currentNowPlaying: NowPlayingInfo? = null
+    private var videoOverlayWasActive = false
 
     // Currently selected nav item index (0 = Home, 1 = Settings)
     private var selectedNavIndex = 0
@@ -70,6 +73,10 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() = returnToTvLauncher()
+        })
 
         Timber.d("MainActivity created")
         bindViews()
@@ -186,6 +193,7 @@ class MainActivity : AppCompatActivity() {
      * Hides the nav panel and content area to give the stream the full screen.
      */
     fun showStreamingScreen() {
+        videoOverlayWasActive = true
         photoScreen.visibility = View.GONE
         nowPlayingScreen.visibility = View.GONE
         nowPlayingScreen.clear()
@@ -197,6 +205,7 @@ class MainActivity : AppCompatActivity() {
 
     fun showPhotoScreen(photoFrame: PhotoFrame) {
         if (photoScreen.showPhoto(photoFrame.bytes)) {
+            videoOverlayWasActive = false
             streamingScreen.visibility = View.GONE
             nowPlayingScreen.visibility = View.GONE
             pinScreen.visibility = View.GONE
@@ -208,6 +217,7 @@ class MainActivity : AppCompatActivity() {
 
     /** Shows the audio-only now-playing card (AirPlay audio with no video). */
     fun showNowPlayingScreen(info: NowPlayingInfo) {
+        videoOverlayWasActive = false
         nowPlayingScreen.update(info)
         streamingScreen.visibility = View.GONE
         photoScreen.visibility = View.GONE
@@ -240,6 +250,10 @@ class MainActivity : AppCompatActivity() {
      * false for other keys so normal navigation is unaffected.
      */
     override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent?): Boolean {
+        if (keyCode == android.view.KeyEvent.KEYCODE_ESCAPE) {
+            returnToTvLauncher()
+            return true
+        }
         val overlayActive = currentNowPlaying != null || currentAirPlayState == ProtocolState.CONNECTED
         if (overlayActive) {
             val command = when (keyCode) {
@@ -261,6 +275,21 @@ class MainActivity : AppCompatActivity() {
             }
         }
         return super.onKeyDown(keyCode, event)
+    }
+
+    /** Open the TV launcher directly instead of finishing into the black window background. */
+    private fun returnToTvLauncher() {
+        val homeIntent = Intent(Intent.ACTION_MAIN).apply {
+            addCategory(Intent.CATEGORY_HOME)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION)
+        }
+        try {
+            startActivity(homeIntent)
+            overridePendingTransition(0, 0)
+        } catch (e: Exception) {
+            Timber.w(e, "Could not launch TV home; moving iMirror task to background")
+            moveTaskToBack(true)
+        }
     }
 
     /**
@@ -331,12 +360,18 @@ class MainActivity : AppCompatActivity() {
             nowPlaying != null -> showNowPlayingScreen(nowPlaying)
             currentAirPlayState == ProtocolState.CONNECTED -> showStreamingScreen()
             photoFrame != null -> showPhotoScreen(photoFrame)
-            else -> hideStreamingScreen()
+            else -> {
+                val returnToHome = videoOverlayWasActive
+                videoOverlayWasActive = false
+                hideStreamingScreen()
+                if (returnToHome) returnToTvLauncher()
+            }
         }
     }
 
     /** Shows the AirPlay pairing PIN over the full screen during SRP pair-setup. */
     fun showPinScreen(pin: String) {
+        videoOverlayWasActive = false
         pinScreen.setPin(pin)
         streamingScreen.visibility = View.GONE
         photoScreen.visibility = View.GONE
