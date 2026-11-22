@@ -66,6 +66,7 @@ class MainActivity : AppCompatActivity() {
     private var currentAirPlayState = ProtocolState.DISABLED
     private var currentNowPlaying: NowPlayingInfo? = null
     private var videoOverlayWasActive = false
+    private var leavingForLauncher = false
 
     // Currently selected nav item index (0 = Home, 1 = Settings)
     private var selectedNavIndex = 0
@@ -97,6 +98,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
+        leavingForLauncher = false
         overlayObserver = lifecycleScope.launch { observeOverlayState() }
     }
 
@@ -107,7 +109,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onUserLeaveHint() {
-        stopVideoSessionForExit()
+        if (!leavingForLauncher) {
+            leavingForLauncher = true
+            stopVideoSessionForExit()
+        }
         super.onUserLeaveHint()
     }
 
@@ -283,6 +288,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun exitToTvLauncher() {
+        if (leavingForLauncher) return
+        leavingForLauncher = true
         stopVideoSessionForExit()
         returnToTvLauncher()
     }
@@ -367,6 +374,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateOverlay(photoFrame: PhotoFrame?, pin: String?) {
+        // Keep the last visible overlay in place until the launcher covers this Activity.
+        // Closing RTSP changes the observed state immediately; hiding the overlay first exposes
+        // the iMirror home UI for a frame during the task transition.
+        if (leavingForLauncher) return
+
         val nowPlaying = currentNowPlaying
         when {
             // PIN pairing (access control) happens before streaming — show the code over everything.
