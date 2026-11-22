@@ -67,14 +67,13 @@ class MainActivity : AppCompatActivity() {
     private var currentNowPlaying: NowPlayingInfo? = null
     private var videoOverlayWasActive = false
     private var leavingForLauncher = false
-    private var defaultWindowAnimations = 0
+    private var stopVideoSessionWhenStopped = false
 
     // Currently selected nav item index (0 = Home, 1 = Settings)
     private var selectedNavIndex = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        defaultWindowAnimations = window.attributes.windowAnimations
         setContentView(R.layout.activity_main)
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
@@ -100,8 +99,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
-        window.setWindowAnimations(defaultWindowAnimations)
         leavingForLauncher = false
+        stopVideoSessionWhenStopped = false
         overlayObserver = lifecycleScope.launch { observeOverlayState() }
     }
 
@@ -109,12 +108,16 @@ class MainActivity : AppCompatActivity() {
         overlayObserver?.cancel()
         overlayObserver = null
         super.onStop()
+        if (stopVideoSessionWhenStopped) {
+            stopVideoSessionWhenStopped = false
+            videoOverlayWasActive = false
+            MirrorService.runningService.value?.stopCurrentAirPlaySession()
+        }
     }
 
     override fun onUserLeaveHint() {
         if (!leavingForLauncher) {
             leavingForLauncher = true
-            window.setWindowAnimations(0)
             stopVideoSessionForExit()
         }
         super.onUserLeaveHint()
@@ -294,15 +297,15 @@ class MainActivity : AppCompatActivity() {
     private fun exitToTvLauncher() {
         if (leavingForLauncher) return
         leavingForLauncher = true
-        window.setWindowAnimations(0)
         stopVideoSessionForExit()
         returnToTvLauncher()
     }
 
     private fun stopVideoSessionForExit() {
         if (!videoOverlayWasActive) return
-        videoOverlayWasActive = false
-        MirrorService.runningService.value?.stopCurrentAirPlaySession()
+        // Let the system finish the HOME/task transition while the last video frame is still
+        // rendered. Close RTSP only after this Activity is no longer visible in onStop().
+        stopVideoSessionWhenStopped = true
     }
 
     /** Open the TV launcher directly instead of finishing into the black window background. */
