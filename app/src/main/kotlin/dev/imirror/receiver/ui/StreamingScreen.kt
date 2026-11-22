@@ -99,11 +99,11 @@ class StreamingScreen @JvmOverloads constructor(
             LayoutParams.MATCH_PARENT
         ).apply { gravity = Gravity.CENTER })
 
-        // Debug HUD overlay, top-left, above the video surface.
+        // Debug HUD overlay, top-right, above the video surface.
         addView(debugView, LayoutParams(
             LayoutParams.WRAP_CONTENT,
             LayoutParams.WRAP_CONTENT
-        ).apply { gravity = Gravity.TOP or Gravity.START; topMargin = 48; leftMargin = 48 })
+        ).apply { gravity = Gravity.TOP or Gravity.RIGHT; topMargin = 48; rightMargin = 48 })
 
         // Register a callback to track when the Surface is created/destroyed
         surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
