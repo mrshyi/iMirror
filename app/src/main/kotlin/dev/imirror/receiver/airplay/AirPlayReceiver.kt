@@ -195,6 +195,11 @@ class AirPlayReceiver(
      */
     fun sendRemoteCommand(command: String) = dacpClient.sendCommand(command)
 
+    /** Disconnects the current sender session while leaving receiver advertising enabled. */
+    fun stopCurrentSession() {
+        rtspHandler?.disconnectActiveSession()
+    }
+
     /** True once a sender has advertised DACP reverse-control (so the TV remote can drive playback). */
     fun isRemoteControlAvailable(): Boolean = dacpClient.isAvailable
 

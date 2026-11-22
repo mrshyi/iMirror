@@ -75,7 +75,7 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
-            override fun handleOnBackPressed() = returnToTvLauncher()
+            override fun handleOnBackPressed() = exitToTvLauncher()
         })
 
         Timber.d("MainActivity created")
@@ -104,6 +104,11 @@ class MainActivity : AppCompatActivity() {
         overlayObserver?.cancel()
         overlayObserver = null
         super.onStop()
+    }
+
+    override fun onUserLeaveHint() {
+        stopVideoSessionForExit()
+        super.onUserLeaveHint()
     }
 
     // ─── View Setup ──────────────────────────────────────────────────────────
@@ -251,7 +256,7 @@ class MainActivity : AppCompatActivity() {
      */
     override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent?): Boolean {
         if (keyCode == android.view.KeyEvent.KEYCODE_ESCAPE) {
-            returnToTvLauncher()
+            exitToTvLauncher()
             return true
         }
         val overlayActive = currentNowPlaying != null || currentAirPlayState == ProtocolState.CONNECTED
@@ -275,6 +280,17 @@ class MainActivity : AppCompatActivity() {
             }
         }
         return super.onKeyDown(keyCode, event)
+    }
+
+    private fun exitToTvLauncher() {
+        stopVideoSessionForExit()
+        returnToTvLauncher()
+    }
+
+    private fun stopVideoSessionForExit() {
+        if (!videoOverlayWasActive) return
+        videoOverlayWasActive = false
+        MirrorService.runningService.value?.stopCurrentAirPlaySession()
     }
 
     /** Open the TV launcher directly instead of finishing into the black window background. */

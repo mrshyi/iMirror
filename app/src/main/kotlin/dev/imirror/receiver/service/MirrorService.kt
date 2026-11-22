@@ -162,6 +162,11 @@ class MirrorService : Service() {
         airPlayReceiver?.sendRemoteCommand(command)
     }
 
+    /** Ends the current AirPlay session without stopping the background receiver service. */
+    fun stopCurrentAirPlaySession() {
+        airPlayReceiver?.stopCurrentSession()
+    }
+
     override fun onDestroy() {
         Logger.i("MirrorService destroying")
         serviceJob.cancel()
