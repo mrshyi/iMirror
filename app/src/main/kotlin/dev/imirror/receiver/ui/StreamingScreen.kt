@@ -67,7 +67,16 @@ class StreamingScreen @JvmOverloads constructor(
     private val tick = object : Runnable {
         override fun run() {
             applyAspectFit()
-            StreamStats.surfaceSize = "${surfaceView.width}x${surfaceView.height}"
+            val containerLocation = IntArray(2)
+            getLocationOnScreen(containerLocation)
+            StreamStats.surfaceSize =
+                "container=${width}x${height}@${containerLocation[0]},${containerLocation[1]} " +
+                    "view=${surfaceView.width}x${surfaceView.height}@${surfaceView.left},${surfaceView.top}"
+            val surfaceFrame = runCatching { surfaceView.holder.surfaceFrame }.getOrNull()
+            val metrics = resources.displayMetrics
+            StreamStats.surfaceBuffer =
+                "frame=${surfaceFrame?.width() ?: 0}x${surfaceFrame?.height() ?: 0} " +
+                    "display=${metrics.widthPixels}x${metrics.heightPixels} rot=${display?.rotation ?: -1}"
             if (StreamStats.overlayEnabled) {
                 debugView.visibility = VISIBLE
                 debugView.text = StreamStats.summary()

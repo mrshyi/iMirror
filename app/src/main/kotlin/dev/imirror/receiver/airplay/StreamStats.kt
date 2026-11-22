@@ -26,8 +26,10 @@ object StreamStats {
     @Volatile var videoWidth = 0
     @Volatile var videoHeight = 0
     @Volatile var videoRotation = 0
+    @Volatile var videoConfig = "—"     // parsed SPS versus configured size hint
     @Volatile var videoOutputGeometry = "—"
-    @Volatile var surfaceSize = "—"
+    @Volatile var surfaceSize = "—"      // container and SurfaceView bounds/position
+    @Volatile var surfaceBuffer = "—"    // Surface frame and display metrics
 
     // ─── Audio (AudioStreamServer) ───────────────────────────────────────────
     @Volatile var audioActive = false  // true while an audio stream is running
@@ -38,7 +40,8 @@ object StreamStats {
     fun resetStreams() {
         videoRes = ""; videoFps = 0; videoQueue = 0; videoDropPct = 0
         videoWidth = 0; videoHeight = 0; videoRotation = 0
-        videoOutputGeometry = "—"; surfaceSize = "—"
+        videoConfig = "—"; videoOutputGeometry = "—"
+        surfaceSize = "—"; surfaceBuffer = "—"
         audioActive = false; audioQueue = 0; audioDupPct = 0
     }
 
@@ -47,7 +50,9 @@ object StreamStats {
         "iMirror · debug\n" +
         "VIDEO  ${videoRes.ifEmpty { "—" }}   ${videoFps} fps   q ${videoQueue}   drop ${videoDropPct}%\n" +
         "OUTPUT ${videoWidth}x${videoHeight}   rot ${videoRotation}°\n" +
+        "CONFIG $videoConfig\n" +
         "GEOM   $videoOutputGeometry\n" +
         "SURFACE $surfaceSize\n" +
+        "BUFFER $surfaceBuffer\n" +
         "AUDIO  " + (if (audioActive) "on   q ${audioQueue}   dup ${audioDupPct}%" else "off")
 }

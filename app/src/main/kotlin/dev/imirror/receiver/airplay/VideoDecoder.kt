@@ -83,9 +83,15 @@ class VideoDecoder(private val outputSurface: Surface) {
         // hardware decoder reads the true size from the SPS (csd-0) itself and reports it via
         // INFO_OUTPUT_FORMAT_CHANGED, which we use to refine the size for aspect-fit.
         val parsed = Companion.parseSpsResolution(spsBytes)
-        val (actualWidth, actualHeight) = parsed?.takeIf { isPlausibleSize(it.first, it.second) } ?: run {
+        val validParsed = parsed?.takeIf { isPlausibleSize(it.first, it.second) }
+        val (actualWidth, actualHeight) = validParsed ?: run {
             Logger.w("SPS resolution $parsed implausible/failed — using hint ${width}x${height}")
             Pair(width, height)
+        }
+        StreamStats.videoConfig = if (validParsed != null) {
+            "SPS parsed=${validParsed.first}x${validParsed.second} hint=${width}x${height}"
+        } else {
+            "SPS fallback=$parsed hint=${width}x${height}"
         }
 
         Logger.i("Initializing H.264 decoder: ${actualWidth}x${actualHeight} " +
@@ -259,6 +265,7 @@ class VideoDecoder(private val outputSurface: Surface) {
             format.getIntegerOrZero(MediaFormat.KEY_HEIGHT),
         )
         val crop = readCrop(format, coded)
+        val cropBounds = describeCropBounds(format)
         val reference = if (referenceWidth > 0 && referenceHeight > 0) {
             PictureSize(referenceWidth, referenceHeight)
         } else {
@@ -282,12 +289,16 @@ class VideoDecoder(private val outputSurface: Surface) {
         StreamStats.videoHeight = displayHeight
         StreamStats.videoRotation = rotation
         StreamStats.videoOutputGeometry =
-            "coded=${coded.width}x${coded.height} crop=${crop?.width}x${crop?.height} " +
-                "SPS=${reference?.width}x${reference?.height} ${resolved.reason}"
+            "codec=${runCatching { mediaCodec?.name }.getOrNull() ?: "unknown"} " +
+                "coded=${coded.width}x${coded.height} crop=${crop?.width}x${crop?.height} " +
+                "bounds=$cropBounds SPS=${reference?.width}x${reference?.height} " +
+                "rotation=${rotation}° ${resolved.reason}"
         Logger.i(
-            "Video output coded=${coded.width}x${coded.height}, crop=${crop?.width}x${crop?.height}, " +
-                "SPS=${reference?.width}x${reference?.height}, resolved=${resolved.width}x${resolved.height}, " +
-                "rotation=${rotation}°, display=${displayWidth}x$displayHeight (${resolved.reason})"
+            "Video output codec=${runCatching { mediaCodec?.name }.getOrNull() ?: "unknown"}, " +
+                "coded=${coded.width}x${coded.height}, crop=${crop?.width}x${crop?.height}, " +
+                "bounds=$cropBounds SPS=${reference?.width}x${reference?.height}, " +
+                "resolved=${resolved.width}x${resolved.height}, rotation=${rotation}°, " +
+                "display=${displayWidth}x$displayHeight (${resolved.reason})"
         )
     }
 
@@ -304,6 +315,14 @@ class VideoDecoder(private val outputSurface: Surface) {
         val height = bottom - top + 1
         return if (width > 0 && height > 0) PictureSize(width, height) else null
     }
+
+    private fun describeCropBounds(format: MediaFormat): String =
+        listOf("crop-left", "crop-top", "crop-right", "crop-bottom").joinToString(
+            prefix = "[", postfix = "]"
+        ) { key ->
+            if (!format.containsKey(key)) "$key=missing"
+            else "$key=${runCatching { format.getInteger(key) }.getOrDefault(-1)}"
+        }
 
     private fun MediaFormat.getIntegerOrZero(key: String): Int =
         runCatching { getInteger(key) }.getOrDefault(0)
