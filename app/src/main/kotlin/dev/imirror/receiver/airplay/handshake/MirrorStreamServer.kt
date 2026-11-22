@@ -67,6 +67,7 @@ class MirrorStreamServer(
     val dataPort: Int get() = serverSocket.localPort
 
     fun start(scope: CoroutineScope) {
+        StreamStats.resetVideoDiagnostics()
         running = true
         scope.launch(Dispatchers.IO) { runReader() }
         scope.launch(Dispatchers.IO) { runDecoder() }
@@ -102,8 +103,10 @@ class MirrorStreamServer(
                     0 -> {
                         // ALWAYS advance the AES-CTR keystream, in order, for every video payload —
                         // skipping any packet desyncs the keystream and corrupts all later frames.
+                        StreamStats.videoPayloads++
                         val annexB = MirrorCrypto.avccToAnnexB(cipher.update(payload))
                         if (annexB.isNotEmpty()) enqueue(Frame(annexB))
+                        else StreamStats.videoAvccEmpty++
                     }
                     1 -> parseConfig(payload)?.let { enqueue(it) }
                     else -> Logger.v("Mirror: ignoring payload type $payloadType ($payloadSize B)")
@@ -124,6 +127,7 @@ class MirrorStreamServer(
             queue.poll()
             queue.offer(item)
             framesDropped++
+            StreamStats.videoQueueDrops = framesDropped
             awaitingKeyframe = true        // a frame was lost — resync the decoder at the next IDR
         }
         StreamStats.videoQueue = queue.size
@@ -205,7 +209,10 @@ class MirrorStreamServer(
             Logger.i("Mirror: surface ${if (liveSurface == null) "lost" else "changed"} — re-attaching decoder")
             rebuildDecoder(liveSurface)
         }
-        val d = decoder ?: return                              // need surface + SPS/PPS first
+        val d = decoder ?: run {                               // need surface + SPS/PPS first
+            StreamStats.videoNoDecoderSkips++
+            return
+        }
         if (!d.isHealthy) {                                    // error state — drop, await next config
             Logger.w("Mirror: decoder unhealthy — dropping, awaiting new SPS/PPS")
             d.release(); decoder = null; configuredSurface = null; lastSps = null; lastPps = null
@@ -214,7 +221,10 @@ class MirrorStreamServer(
         if (awaitingKeyframe) {
             // After a dropped frame the stream is reference-broken; skip until the next IDR so we
             // don't feed the decoder predicted frames with missing references (which smear/blocky).
-            if (!isKeyframe(annexB)) return
+            if (!isKeyframe(annexB)) {
+                StreamStats.videoKeyframeSkips++
+                return
+            }
             awaitingKeyframe = false
             Logger.i("Mirror: resynced on keyframe after a dropped frame")
         }

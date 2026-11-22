@@ -208,9 +208,11 @@ class VideoDecoder(private val outputSurface: Surface) {
                     presentationTimeUs,
                     0                  // flags: 0 = normal frame (not end-of-stream)
                 )
+                StreamStats.videoInputSubmitted++
             } else {
                 // No input buffer available — the decoder is catching up.
                 // Drop this NAL unit to avoid building up backlog (prefer low latency).
+                StreamStats.videoInputMisses++
                 Logger.v("VideoDecoder: no input buffer available, dropping NAL unit")
             }
 
@@ -220,9 +222,11 @@ class VideoDecoder(private val outputSurface: Surface) {
 
         } catch (e: IllegalStateException) {
             // MediaCodec is now in the error state and cannot recover — flag for recreation.
+            StreamStats.videoCodecErrors++
             Logger.e("VideoDecoder entered error state — will recreate", e)
             isHealthy = false
         } catch (e: Exception) {
+            StreamStats.videoCodecErrors++
             Logger.e("Error decoding NAL unit", e)
         }
     }
@@ -253,6 +257,7 @@ class VideoDecoder(private val outputSurface: Surface) {
                 // decoder → the upstream frame queue saturates → big latency + dropped (corrupt) frames.
                 // A/V alignment is handled by keeping the AUDIO path low-latency instead (AudioStreamServer).
                 codec.releaseOutputBuffer(outputBufferIndex, true)
+                StreamStats.videoOutputReleased++
             }
             outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, 0)
         }

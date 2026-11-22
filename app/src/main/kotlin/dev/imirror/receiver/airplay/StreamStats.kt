@@ -20,6 +20,15 @@ object StreamStats {
     @Volatile var videoFps = 0         // frames/sec over the last sample window
     @Volatile var videoQueue = 0       // current decode-queue depth
     @Volatile var videoDropPct = 0     // cumulative % of frames dropped under load
+    @Volatile var videoPayloads = 0
+    @Volatile var videoAvccEmpty = 0
+    @Volatile var videoQueueDrops = 0
+    @Volatile var videoKeyframeSkips = 0
+    @Volatile var videoNoDecoderSkips = 0
+    @Volatile var videoInputSubmitted = 0
+    @Volatile var videoInputMisses = 0
+    @Volatile var videoOutputReleased = 0
+    @Volatile var videoCodecErrors = 0
 
     // Actual decoded video dimensions (from the SPS, so portrait phone streams are portrait here).
     // StreamingScreen reads these to aspect-fit the Surface instead of stretching to 16:9.
@@ -42,7 +51,16 @@ object StreamStats {
         videoWidth = 0; videoHeight = 0; videoRotation = 0
         videoConfig = "—"; videoOutputGeometry = "—"
         surfaceSize = "—"; surfaceBuffer = "—"
+        resetVideoDiagnostics()
         audioActive = false; audioQueue = 0; audioDupPct = 0
+    }
+
+    /** Reset counters for a fresh video stream without touching audio counters. */
+    fun resetVideoDiagnostics() {
+        videoPayloads = 0; videoAvccEmpty = 0; videoQueueDrops = 0
+        videoKeyframeSkips = 0; videoNoDecoderSkips = 0
+        videoInputSubmitted = 0; videoInputMisses = 0
+        videoOutputReleased = 0; videoCodecErrors = 0
     }
 
     /** Human-readable multi-line HUD text. */
@@ -54,5 +72,9 @@ object StreamStats {
         "GEOM   $videoOutputGeometry\n" +
         "SURFACE $surfaceSize\n" +
         "BUFFER $surfaceBuffer\n" +
+        "PIPE rx=$videoPayloads avccEmpty=$videoAvccEmpty qDrop=$videoQueueDrops " +
+            "keySkip=$videoKeyframeSkips noDecoder=$videoNoDecoderSkips\n" +
+        "CODEC in=$videoInputSubmitted inputMiss=$videoInputMisses " +
+            "out=$videoOutputReleased errors=$videoCodecErrors\n" +
         "AUDIO  " + (if (audioActive) "on   q ${audioQueue}   dup ${audioDupPct}%" else "off")
 }
