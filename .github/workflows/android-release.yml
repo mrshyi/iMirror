@@ -78,10 +78,11 @@ jobs:
           APK_OUTPUT_DIR: app/build/outputs/apk/release
           PACKAGE_DIR: app/build/outputs/release-assets
           VERSION_NAME: 1.0.1-rc.1
+          SIGNED_BUILD: ${{ startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-') }}
         run: |
           set -euo pipefail
           mkdir -p "$PACKAGE_DIR"
-          python3 - "$APK_OUTPUT_DIR" "$PACKAGE_DIR" "$VERSION_NAME" <<'PY'
+          python3 - "$APK_OUTPUT_DIR" "$PACKAGE_DIR" "$VERSION_NAME" "$SIGNED_BUILD" <<'PY'
           from pathlib import Path
           import shutil
           import sys
@@ -90,6 +91,7 @@ jobs:
           apk_dir = Path(sys.argv[1])
           package_dir = Path(sys.argv[2])
           version = sys.argv[3]
+          signed_build = sys.argv[4].lower() == "true"
           abis = ("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
           native_names = (
               "libalac.so",
@@ -129,22 +131,37 @@ jobs:
                   if archive.read("assets/licenses/NOTICE.md") != Path("NOTICE.md").read_bytes():
                       raise SystemExit("Bundled NOTICE does not match source")
 
+          print("Release APK outputs:", sorted(path.name for path in apk_dir.glob("*.apk")))
+
+          def locate_apk(stem: str) -> Path:
+              matches = list(apk_dir.glob(f"{stem}*.apk"))
+              if len(matches) != 1:
+                  raise SystemExit(f"Expected one APK matching {stem}*.apk; found {matches}")
+              source = matches[0]
+              unsigned = source.name.endswith("-unsigned.apk")
+              if unsigned == signed_build:
+                  raise SystemExit(
+                      f"Unexpected signing suffix for {source.name}: signed_build={signed_build}"
+                  )
+              return source
+
+          asset_suffix = "release" if signed_build else "release-unsigned"
           for abi in abis:
-              source = apk_dir / f"app-{abi}-release.apk"
+              source = locate_apk(f"app-{abi}-release")
               expected = {f"lib/{abi}/{name}" for name in native_names}
               verify_apk(source, expected)
-              shutil.copyfile(source, package_dir / f"iMirror-{version}-{abi}-release.apk")
+              shutil.copyfile(source, package_dir / f"iMirror-{version}-{abi}-{asset_suffix}.apk")
 
-          universal = apk_dir / "app-universal-release.apk"
+          universal = locate_apk("app-universal-release")
           expected_universal = {
               f"lib/{abi}/{name}" for abi in abis for name in native_names
           }
           verify_apk(universal, expected_universal)
           shutil.copyfile(
               universal,
-              package_dir / f"iMirror-{version}-universal-release.apk",
+              package_dir / f"iMirror-{version}-universal-{asset_suffix}.apk",
           )
-          print(f"Verified {len(abis)} ABI release APKs and one universal release APK.")
+          print(f"Verified {len(abis)} ABI APKs and one universal APK; signed={signed_build}.")
           PY
 
       - name: Verify signed APKs for prerelease
