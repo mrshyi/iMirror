@@ -1,4 +1,4 @@
-name: Android APKs (all ABIs)
+name: Android Release APKs (all ABIs)
 
 on:
   push:
@@ -39,12 +39,43 @@ jobs:
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_HOME" --install \
             "platforms;android-35" "build-tools;34.0.0" "ndk;28.2.13676358" "cmake;3.22.1"
 
-      - name: Assemble ABI and universal debug APKs
-        run: ./gradlew --no-daemon :app:assembleDebug
-
-      - name: Verify and package APKs
+      - name: Prepare prerelease signing key
+        if: startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-')
         env:
-          APK_OUTPUT_DIR: app/build/outputs/apk/debug
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for name in RELEASE_KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::Missing required signing secret: $name"
+              exit 1
+            fi
+          done
+          key_path="$RUNNER_TEMP/imirror-prerelease.jks"
+          printf '%s' "$RELEASE_KEYSTORE_BASE64" | base64 --decode > "$key_path"
+          chmod 600 "$key_path"
+          keytool -list -keystore "$key_path" -storepass:env KEYSTORE_PASSWORD \
+            -alias "$KEY_ALIAS" >/dev/null
+          echo "KEYSTORE_PATH=$key_path" >> "$GITHUB_ENV"
+
+      - name: Assemble signed release APKs
+        if: startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-')
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: ./gradlew --no-daemon :app:assembleRelease
+
+      - name: Assemble unsigned release APKs for non-tag builds
+        if: ${{ ! (startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-')) }}
+        run: ./gradlew --no-daemon :app:assembleRelease
+
+      - name: Verify and package release APKs
+        env:
+          APK_OUTPUT_DIR: app/build/outputs/apk/release
           PACKAGE_DIR: app/build/outputs/release-assets
           VERSION_NAME: 1.0.1-rc.1
         run: |
@@ -68,7 +99,7 @@ jobs:
 
           def verify_apk(path: Path, expected_libs: set[str]) -> None:
               if not path.is_file():
-                  raise SystemExit(f"Missing expected APK: {path}")
+                  raise SystemExit(f"Missing expected release APK: {path}")
               with ZipFile(path) as archive:
                   corrupt = archive.testzip()
                   if corrupt:
@@ -99,23 +130,33 @@ jobs:
                       raise SystemExit("Bundled NOTICE does not match source")
 
           for abi in abis:
-              source = apk_dir / f"app-{abi}-debug.apk"
+              source = apk_dir / f"app-{abi}-release.apk"
               expected = {f"lib/{abi}/{name}" for name in native_names}
               verify_apk(source, expected)
-              target = package_dir / f"iMirror-{version}-{abi}-debug.apk"
-              shutil.copyfile(source, target)
+              shutil.copyfile(source, package_dir / f"iMirror-{version}-{abi}-release.apk")
 
-          universal = apk_dir / "app-universal-debug.apk"
+          universal = apk_dir / "app-universal-release.apk"
           expected_universal = {
               f"lib/{abi}/{name}" for abi in abis for name in native_names
           }
           verify_apk(universal, expected_universal)
           shutil.copyfile(
               universal,
-              package_dir / f"iMirror-{version}-universal-debug.apk",
+              package_dir / f"iMirror-{version}-universal-release.apk",
           )
-          print(f"Verified {len(abis)} ABI APKs and one universal APK.")
+          print(f"Verified {len(abis)} ABI release APKs and one universal release APK.")
           PY
+
+      - name: Verify signed APKs for prerelease
+        if: startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-')
+        env:
+          PACKAGE_DIR: app/build/outputs/release-assets
+        run: |
+          set -euo pipefail
+          apksigner="$ANDROID_HOME/build-tools/34.0.0/apksigner"
+          for apk in "$PACKAGE_DIR"/*.apk; do
+            "$apksigner" verify --verbose "$apk"
+          done
 
       - name: Archive exact source revision and checksums
         env:
@@ -133,22 +174,35 @@ jobs:
       - name: Upload build artifacts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: imirror-apks-${{ github.sha }}
+          name: imirror-release-apks-${{ github.sha }}
           path: app/build/outputs/release-assets/
           if-no-files-found: error
           retention-days: 90
 
-      - name: Publish GitHub release assets
+      - name: Publish GitHub prerelease assets
         if: startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-')
         env:
           GH_TOKEN: ${{ github.token }}
+          PACKAGE_DIR: app/build/outputs/release-assets
         run: |
           set -euo pipefail
           tag="$GITHUB_REF_NAME"
-          notes="Pre-release test build. APKs are debug-signed and include armeabi-v7a, arm64-v8a, x86, x86_64, and universal variants. If Android reports a signature mismatch while updating an older installation, uninstall the old app first. TV installation and playback still require device testing."
+          notes="Release-variant APKs for armeabi-v7a, arm64-v8a, x86, x86_64, and universal. Signed with the new iMirror prerelease certificate. This certificate differs from earlier builds; uninstall an older install before installing if Android reports a signature mismatch."
+          new_source="imirror-source-${GITHUB_SHA}.tar.gz"
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" app/build/outputs/release-assets/* --clobber
+            gh release upload "$tag" "$PACKAGE_DIR"/* --clobber
+            gh release edit "$tag" --title "iMirror $tag" --notes "$notes" --prerelease
+            mapfile -t old_assets < <(gh release view "$tag" --json assets --jq '.assets[].name')
+            for asset in "${old_assets[@]}"; do
+              case "$asset" in
+                *-debug.apk|imirror-source-*.tar.gz)
+                  if [[ "$asset" != "$new_source" ]]; then
+                    gh release delete-asset "$tag" "$asset" --yes
+                  fi
+                  ;;
+              esac
+            done
           else
-            gh release create "$tag" app/build/outputs/release-assets/* \
+            gh release create "$tag" "$PACKAGE_DIR"/* \
               --verify-tag --prerelease --title "iMirror $tag" --notes "$notes"
           fi
