@@ -2,11 +2,13 @@ package dev.imirror.receiver.airplay
 
 import android.content.Context
 import android.net.nsd.NsdManager
+import android.net.nsd.NsdServiceInfo
+import android.net.wifi.WifiManager
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.slot
 import io.mockk.verify
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -39,8 +41,16 @@ class MdnsServiceTest {
         mockContext = mockk(relaxed = true)
         mockNsdManager = mockk(relaxed = true)
 
-        // Tell the mock context to return our mock NsdManager
+        every { mockContext.applicationContext } returns mockContext
         every { mockContext.getSystemService(Context.NSD_SERVICE) } returns mockNsdManager
+        every { mockContext.getSystemService(WifiManager::class.java) } returns null
+        every { mockContext.getSharedPreferences(any(), any()).getString(any(), null) } returns "test-id"
+
+        val registeredService = mockk<NsdServiceInfo>()
+        every { registeredService.serviceName } returns "Test receiver"
+        every { mockNsdManager.registerService(any(), NsdManager.PROTOCOL_DNS_SD, any()) } answers {
+            thirdArg<NsdManager.RegistrationListener>().onServiceRegistered(registeredService)
+        }
 
         mdnsService = MdnsService(mockContext)
     }
@@ -53,9 +63,18 @@ class MdnsServiceTest {
      */
     @Test
     fun `start registers two mDNS services`() {
+        val raopListener = slot<NsdManager.RegistrationListener>()
+        every { mockNsdManager.registerService(any(), NsdManager.PROTOCOL_DNS_SD, capture(raopListener)) } returns Unit
+
         mdnsService.start()
 
-        // Verify that NsdManager.registerService was called exactly 2 times
+        verify(exactly = 1) {
+            mockNsdManager.registerService(any(), NsdManager.PROTOCOL_DNS_SD, any())
+        }
+
+        val registeredRaop = mockk<NsdServiceInfo>()
+        every { registeredRaop.serviceName } returns "Test RAOP"
+        raopListener.captured.onServiceRegistered(registeredRaop)
         verify(exactly = 2) {
             mockNsdManager.registerService(any(), NsdManager.PROTOCOL_DNS_SD, any())
         }
@@ -99,9 +118,7 @@ class MdnsServiceTest {
     /**
      * Test: Calling stop() without a prior start() does not crash.
      *
-     * WHY: MainActivity.onDestroy() always calls receiver.stop(), even if
-     * onCreate() failed before start() was called. Stop must be safe to call
-     * in any state.
+     * Stop must be safe even when receiver startup did not reach mDNS registration.
      */
     @Test
     fun `stop without start does not crash`() {
@@ -148,9 +165,8 @@ class MdnsServiceTest {
         service.start()
         service.restart()
 
-        // After restart: stop (2 unregisters) + start (2 registers) = 4 register calls total
-        // But first start = 2, restart start = 2 more
-        verify(atLeast = 4) {
+        verify(exactly = 2) { mockNsdManager.unregisterService(any()) }
+        verify(exactly = 4) {
             mockNsdManager.registerService(any(), NsdManager.PROTOCOL_DNS_SD, any())
         }
     }

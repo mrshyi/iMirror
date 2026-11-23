@@ -72,6 +72,8 @@ class AirPlayReceiver(
      * Guaranteed to be called BEFORE [onStateChanged] is called with [ProtocolState.CONNECTED].
      */
     private val onSenderNameChanged: (String) -> Unit = {},
+    /** Called before CONNECTED with the media kinds in the current video/audio session. */
+    private val onVideoSessionChanged: (Boolean) -> Unit = {},
     /** Called when iOS/macOS sends a JPEG/PNG to the `/photo` endpoint. */
     private val onPhotoReceived: (bytes: ByteArray, imageType: PhotoImageType) -> Unit = { _, _ -> },
     /** Called when iOS/macOS clears the currently displayed `/photo`. */
@@ -149,13 +151,16 @@ class AirPlayReceiver(
     fun start() {
         Logger.i("AirPlayReceiver starting (displayName='$displayName')")
         scope.launch {
-            try {
-                startTimingHandler()
-                startMdnsService()
-                startRtspHandler()
-            } catch (e: Exception) {
-                Logger.e("Failed to start AirPlayReceiver", e)
-                emitState(ProtocolState.ERROR)
+            synchronized(this@AirPlayReceiver) {
+                if (!job.isActive) return@launch
+                try {
+                    startTimingHandler()
+                    startMdnsService()
+                    startRtspHandler()
+                } catch (e: Exception) {
+                    Logger.e("Failed to start AirPlayReceiver", e)
+                    emitState(ProtocolState.ERROR)
+                }
             }
         }
     }
@@ -168,8 +173,10 @@ class AirPlayReceiver(
      *
      * MUST be called when [MirrorService] stops or is destroyed.
      */
+    @Synchronized
     fun stop() {
         Logger.i("AirPlayReceiver stopping")
+        scope.cancel()
         try {
             rtspHandler?.stop()
             timingHandler?.stop()
@@ -178,8 +185,6 @@ class AirPlayReceiver(
             releaseMediaComponents()
         } catch (e: Exception) {
             Logger.e("Error during AirPlayReceiver stop", e)
-        } finally {
-            scope.cancel()
         }
     }
 
@@ -189,6 +194,11 @@ class AirPlayReceiver(
      * has advertised a DACP identity yet.
      */
     fun sendRemoteCommand(command: String) = dacpClient.sendCommand(command)
+
+    /** Disconnects the current sender session while leaving receiver advertising enabled. */
+    fun stopCurrentSession() {
+        rtspHandler?.disconnectActiveSession()
+    }
 
     /** True once a sender has advertised DACP reverse-control (so the TV remote can drive playback). */
     fun isRemoteControlAvailable(): Boolean = dacpClient.isAvailable
@@ -278,6 +288,7 @@ class AirPlayReceiver(
                 // Notify MirrorService of the sender name BEFORE emitting CONNECTED,
                 // so the name is ready when the ActiveConnection is created.
                 onSenderNameChanged(session.senderName)
+                onVideoSessionChanged(session.hasVideo)
                 emitState(ProtocolState.CONNECTED)
             } catch (e: Exception) {
                 Logger.e("Failed to start media pipeline", e)
@@ -295,13 +306,9 @@ class AirPlayReceiver(
     private fun onStreamingStopped() {
         Logger.i("Streaming stopped — releasing media components")
         releaseMediaComponents()
-        emitState(ProtocolState.ADVERTISING)
-
         scope.launch {
-            try {
-                mdnsService?.restart(displayName.ifBlank { null })
-            } catch (e: Exception) {
-                Logger.e("Failed to restart mDNS after streaming", e)
+            synchronized(this@AirPlayReceiver) {
+                if (job.isActive) mdnsService?.restart(displayName.ifBlank { null })
             }
         }
     }
@@ -440,6 +447,7 @@ class AirPlayReceiver(
         // AirPlay 2 NTP is receiver-initiated: poll the sender's timing port so macOS proceeds.
         val ntp = AirPlayNtpClient(remoteAddress, senderTimingPort).also { ntpClient = it; it.start(scope) }
         onSenderNameChanged("AirPlay")
+        onVideoSessionChanged(true) // AirPlay 2 mirror setup always requires a video Surface.
         emitState(ProtocolState.CONNECTED)
         Logger.i("Mirror keys set; eventPort=${event.localPort} timingPort=${ntp.localPort}")
         return event.localPort to ntp.localPort
@@ -452,10 +460,14 @@ class AirPlayReceiver(
     private fun startMirrorStream(streamConnectionId: Long): Int {
         val aesKey = mirrorAesKey ?: run { Logger.e("mirror stream start before keys set"); return 0 }
         val ecdhSecret = mirrorEcdhSecret ?: return 0
-        return MirrorStreamServer(aesKey, ecdhSecret, streamConnectionId, videoSurfaceProvider, mirrorWidth, mirrorHeight)
-            .also { mirrorServer = it; it.start(scope); videoPlaying = true; emitNowPlaying() }
-            .dataPort
-            .also { Logger.i("Mirror data server started on port $it") }
+        val server = MirrorStreamServer(
+            aesKey, ecdhSecret, streamConnectionId, videoSurfaceProvider, mirrorWidth, mirrorHeight
+        )
+        mirrorServer = server
+        videoPlaying = true
+        emitNowPlaying()
+        server.start(scope)
+        return server.dataPort.also { Logger.i("Mirror data server started on port $it") }
     }
 
     /** Mirror SETUP audio stream (type 96): start the AAC-ELD / AAC-LC / ALAC audio server. @return (dataPort, controlPort). */
@@ -496,6 +508,7 @@ class AirPlayReceiver(
      */
     private fun startUrlVideo(url: String, startFraction: Double) {
         onSenderNameChanged("AirPlay")
+        onVideoSessionChanged(true)
         emitState(ProtocolState.CONNECTED)   // shows StreamingScreen → Surface becomes available
         val player = urlVideoPlayer ?: AirPlayVideoPlayer(
             surfaceProvider = videoSurfaceProvider,

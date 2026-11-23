@@ -1,0 +1,154 @@
+name: Android APKs (all ABIs)
+
+on:
+  push:
+    branches:
+      - '**'
+    tags:
+      - 'v*-*'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK packages
+        run: |
+          test "$(uname -m)" = x86_64
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_HOME" --install \
+            "platforms;android-35" "build-tools;34.0.0" "ndk;28.2.13676358" "cmake;3.22.1"
+
+      - name: Assemble ABI and universal debug APKs
+        run: ./gradlew --no-daemon :app:assembleDebug
+
+      - name: Verify and package APKs
+        env:
+          APK_OUTPUT_DIR: app/build/outputs/apk/debug
+          PACKAGE_DIR: app/build/outputs/release-assets
+          VERSION_NAME: 1.0.1-rc.1
+        run: |
+          set -euo pipefail
+          mkdir -p "$PACKAGE_DIR"
+          python3 - "$APK_OUTPUT_DIR" "$PACKAGE_DIR" "$VERSION_NAME" <<'PY'
+          from pathlib import Path
+          import shutil
+          import sys
+          from zipfile import ZipFile
+
+          apk_dir = Path(sys.argv[1])
+          package_dir = Path(sys.argv[2])
+          version = sys.argv[3]
+          abis = ("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+          native_names = (
+              "libalac.so",
+              "libdatastore_shared_counter.so",
+              "libplayfair.so",
+          )
+
+          def verify_apk(path: Path, expected_libs: set[str]) -> None:
+              if not path.is_file():
+                  raise SystemExit(f"Missing expected APK: {path}")
+              with ZipFile(path) as archive:
+                  corrupt = archive.testzip()
+                  if corrupt:
+                      raise SystemExit(f"Corrupt entry in {path}: {corrupt}")
+                  entries = set(archive.namelist())
+                  actual_libs = {
+                      name for name in entries
+                      if name.startswith("lib/") and name.endswith(".so")
+                  }
+                  if actual_libs != expected_libs:
+                      raise SystemExit(
+                          f"Unexpected native libraries in {path}: "
+                          f"missing={sorted(expected_libs - actual_libs)}, "
+                          f"extra={sorted(actual_libs - expected_libs)}"
+                      )
+                  required_notices = {
+                      "assets/licenses/Apache-2.0.txt",
+                      "assets/licenses/NOTICE.md",
+                  }
+                  missing = required_notices - entries
+                  if missing:
+                      raise SystemExit(
+                          f"Missing license files in {path}: {sorted(missing)}"
+                      )
+                  if archive.read("assets/licenses/Apache-2.0.txt") != Path("LICENSES/Apache-2.0.txt").read_bytes():
+                      raise SystemExit("Bundled Apache license does not match source")
+                  if archive.read("assets/licenses/NOTICE.md") != Path("NOTICE.md").read_bytes():
+                      raise SystemExit("Bundled NOTICE does not match source")
+
+          for abi in abis:
+              source = apk_dir / f"app-{abi}-debug.apk"
+              expected = {f"lib/{abi}/{name}" for name in native_names}
+              verify_apk(source, expected)
+              target = package_dir / f"iMirror-{version}-{abi}-debug.apk"
+              shutil.copyfile(source, target)
+
+          universal = apk_dir / "app-universal-debug.apk"
+          expected_universal = {
+              f"lib/{abi}/{name}" for abi in abis for name in native_names
+          }
+          verify_apk(universal, expected_universal)
+          shutil.copyfile(
+              universal,
+              package_dir / f"iMirror-{version}-universal-debug.apk",
+          )
+          print(f"Verified {len(abis)} ABI APKs and one universal APK.")
+          PY
+
+      - name: Archive exact source revision and checksums
+        env:
+          PACKAGE_DIR: app/build/outputs/release-assets
+        run: |
+          set -euo pipefail
+          git archive --format=tar.gz --prefix="imirror-${GITHUB_SHA}/" "$GITHUB_SHA" \
+            > "$PACKAGE_DIR/imirror-source-${GITHUB_SHA}.tar.gz"
+          (
+            cd "$PACKAGE_DIR"
+            sha256sum ./*.apk ./*.tar.gz > SHA256SUMS.txt
+          )
+          cat "$PACKAGE_DIR/SHA256SUMS.txt" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: imirror-apks-${{ github.sha }}
+          path: app/build/outputs/release-assets/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish GitHub release assets
+        if: startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          notes="Pre-release test build. APKs are debug-signed and include armeabi-v7a, arm64-v8a, x86, x86_64, and universal variants. If Android reports a signature mismatch while updating an older installation, uninstall the old app first. TV installation and playback still require device testing."
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" app/build/outputs/release-assets/* --clobber
+          else
+            gh release create "$tag" app/build/outputs/release-assets/* \
+              --verify-tag --prerelease --title "iMirror $tag" --notes "$notes"
+          fi

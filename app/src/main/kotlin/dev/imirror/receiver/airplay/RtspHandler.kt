@@ -157,6 +157,14 @@ open class RtspHandler(
         Logger.i("RTSP handler stopped")
     }
 
+    /** Ends only the active sender session; the RTSP listener remains available for reconnects. */
+    fun disconnectActiveSession() {
+        val client = activeClient ?: return
+        Logger.i("Locally disconnecting active AirPlay session")
+        runCatching { client.close() }
+            .onFailure { Logger.e("Could not close active AirPlay control socket", it) }
+    }
+
     /**
      * Binds the RTSP port with SO_REUSEADDR, retrying briefly if a just-stopped instance hasn't
      * released it yet. A quick service stop→start (the activity being destroyed and relaunched)

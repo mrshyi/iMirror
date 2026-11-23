@@ -34,6 +34,10 @@ class VideoDecoder(private val outputSurface: Surface) {
     // The underlying hardware decoder — null until initialize() is called
     private var mediaCodec: MediaCodec? = null
 
+    // Parsed from the input SPS before the decoder can replace it with panel-scaled output sizes.
+    private var referenceWidth = 0
+    private var referenceHeight = 0
+
     // Track whether the decoder has been initialized (to prevent double-init)
     @Volatile
     private var isInitialized = false
@@ -79,17 +83,28 @@ class VideoDecoder(private val outputSurface: Surface) {
         // hardware decoder reads the true size from the SPS (csd-0) itself and reports it via
         // INFO_OUTPUT_FORMAT_CHANGED, which we use to refine the size for aspect-fit.
         val parsed = Companion.parseSpsResolution(spsBytes)
-        val (actualWidth, actualHeight) = parsed?.takeIf { isPlausibleSize(it.first, it.second) } ?: run {
+        val validParsed = parsed?.takeIf { isPlausibleSize(it.first, it.second) }
+        val (actualWidth, actualHeight) = validParsed ?: run {
             Logger.w("SPS resolution $parsed implausible/failed — using hint ${width}x${height}")
             Pair(width, height)
+        }
+        StreamStats.videoConfig = if (validParsed != null) {
+            "SPS parsed=${validParsed.first}x${validParsed.second} hint=${width}x${height}"
+        } else {
+            "SPS fallback=$parsed hint=${width}x${height}"
         }
 
         Logger.i("Initializing H.264 decoder: ${actualWidth}x${actualHeight} " +
                  "(hint was ${width}x${height})")
 
+        referenceWidth = actualWidth
+        referenceHeight = actualHeight
+
         // Provisional size for StreamingScreen aspect-fit; replaced by the decoder's reported size.
         StreamStats.videoWidth = actualWidth
         StreamStats.videoHeight = actualHeight
+        StreamStats.videoRotation = 0
+        StreamStats.videoOutputGeometry = "SPS ${actualWidth}x$actualHeight"
 
         // Create the MediaFormat that describes the H.264 stream to the hardware decoder
         val format = MediaFormat.createVideoFormat(
@@ -193,9 +208,11 @@ class VideoDecoder(private val outputSurface: Surface) {
                     presentationTimeUs,
                     0                  // flags: 0 = normal frame (not end-of-stream)
                 )
+                StreamStats.videoInputSubmitted++
             } else {
                 // No input buffer available — the decoder is catching up.
                 // Drop this NAL unit to avoid building up backlog (prefer low latency).
+                StreamStats.videoInputMisses++
                 Logger.v("VideoDecoder: no input buffer available, dropping NAL unit")
             }
 
@@ -205,9 +222,11 @@ class VideoDecoder(private val outputSurface: Surface) {
 
         } catch (e: IllegalStateException) {
             // MediaCodec is now in the error state and cannot recover — flag for recreation.
+            StreamStats.videoCodecErrors++
             Logger.e("VideoDecoder entered error state — will recreate", e)
             isHealthy = false
         } catch (e: Exception) {
+            StreamStats.videoCodecErrors++
             Logger.e("Error decoding NAL unit", e)
         }
     }
@@ -238,25 +257,80 @@ class VideoDecoder(private val outputSurface: Surface) {
                 // decoder → the upstream frame queue saturates → big latency + dropped (corrupt) frames.
                 // A/V alignment is handled by keeping the AUDIO path low-latency instead (AudioStreamServer).
                 codec.releaseOutputBuffer(outputBufferIndex, true)
+                StreamStats.videoOutputReleased++
             }
             outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, 0)
         }
     }
 
-    /** Reads the decoder's true display size (honouring the crop rectangle) for StreamingScreen. */
+    /** Resolves the content size against coded dimensions, decoder crop, and the input SPS. */
     private fun publishOutputSize(format: MediaFormat) {
-        var w = format.getInteger(MediaFormat.KEY_WIDTH)
-        var h = format.getInteger(MediaFormat.KEY_HEIGHT)
-        if (format.containsKey("crop-left") && format.containsKey("crop-right")) {
-            w = format.getInteger("crop-right") - format.getInteger("crop-left") + 1
-            h = format.getInteger("crop-bottom") - format.getInteger("crop-top") + 1
+        val coded = PictureSize(
+            format.getIntegerOrZero(MediaFormat.KEY_WIDTH),
+            format.getIntegerOrZero(MediaFormat.KEY_HEIGHT),
+        )
+        val crop = readCrop(format, coded)
+        val cropBounds = describeCropBounds(format)
+        val reference = if (referenceWidth > 0 && referenceHeight > 0) {
+            PictureSize(referenceWidth, referenceHeight)
+        } else {
+            null
         }
-        if (isPlausibleSize(w, h)) {
-            StreamStats.videoWidth = w
-            StreamStats.videoHeight = h
-            Logger.i("Video output size ${w}x$h")
+        val resolved = OutputSizeResolver.resolve(coded, crop, reference)
+        if (!isPlausibleSize(resolved.width, resolved.height)) return
+
+        val rotation = if (format.containsKey(MediaFormat.KEY_ROTATION)) {
+            ((format.getInteger(MediaFormat.KEY_ROTATION) % 360) + 360) % 360
+        } else {
+            0
         }
+        // Crop is applied before decoder rotation; use the post-rotation dimensions for aspect-fit.
+        val (displayWidth, displayHeight) = if (rotation == 90 || rotation == 270) {
+            resolved.height to resolved.width
+        } else {
+            resolved.width to resolved.height
+        }
+        StreamStats.videoWidth = displayWidth
+        StreamStats.videoHeight = displayHeight
+        StreamStats.videoRotation = rotation
+        StreamStats.videoOutputGeometry =
+            "codec=${runCatching { mediaCodec?.name }.getOrNull() ?: "unknown"} " +
+                "coded=${coded.width}x${coded.height} crop=${crop?.width}x${crop?.height} " +
+                "bounds=$cropBounds SPS=${reference?.width}x${reference?.height} " +
+                "rotation=${rotation}° ${resolved.reason}"
+        Logger.i(
+            "Video output codec=${runCatching { mediaCodec?.name }.getOrNull() ?: "unknown"}, " +
+                "coded=${coded.width}x${coded.height}, crop=${crop?.width}x${crop?.height}, " +
+                "bounds=$cropBounds SPS=${reference?.width}x${reference?.height}, " +
+                "resolved=${resolved.width}x${resolved.height}, rotation=${rotation}°, " +
+                "display=${displayWidth}x$displayHeight (${resolved.reason})"
+        )
     }
+
+    private fun readCrop(format: MediaFormat, coded: PictureSize): PictureSize? {
+        val hasHorizontalCrop = format.containsKey("crop-left") && format.containsKey("crop-right")
+        val hasVerticalCrop = format.containsKey("crop-top") && format.containsKey("crop-bottom")
+        if (!hasHorizontalCrop && !hasVerticalCrop) return null
+
+        val left = if (hasHorizontalCrop) format.getIntegerOrZero("crop-left") else 0
+        val right = if (hasHorizontalCrop) format.getIntegerOrZero("crop-right") else coded.width - 1
+        val top = if (hasVerticalCrop) format.getIntegerOrZero("crop-top") else 0
+        val bottom = if (hasVerticalCrop) format.getIntegerOrZero("crop-bottom") else coded.height - 1
+        val width = right - left + 1
+        val height = bottom - top + 1
+        return if (width > 0 && height > 0) PictureSize(width, height) else null
+    }
+
+    private fun describeCropBounds(format: MediaFormat): String =
+        listOf("crop-left", "crop-top", "crop-right", "crop-bottom").joinToString(
+            prefix = "[", postfix = "]"
+        ) { key ->
+            if (!format.containsKey(key)) "$key=missing"
+            else "$key=${runCatching { format.getInteger(key) }.getOrDefault(-1)}"
+        }
+
+    private fun MediaFormat.getIntegerOrZero(key: String): Int =
+        runCatching { getInteger(key) }.getOrDefault(0)
 
     /**
      * Releases all MediaCodec resources.
@@ -308,13 +382,20 @@ class VideoDecoder(private val outputSurface: Surface) {
          *
          * Exposed as `internal` for unit testing without an Android runtime.
          *
-         * @param sps The raw SPS NAL unit bytes (first byte is the NAL type, 0x67).
+         * @param sps SPS NAL bytes, optionally preceded by a three/four-byte Annex-B start code.
          * @return (width, height) in pixels, or null if parsing fails.
          */
         internal fun parseSpsResolution(sps: ByteArray): Pair<Int, Int>? {
             try {
-                if (sps.size < 4) return null
-                val reader = SpsBitReader(sps, startOffset = 1)  // skip NAL type byte (0x67)
+                val nalOffset = when {
+                    sps.size >= 4 && sps[0] == 0.toByte() && sps[1] == 0.toByte() &&
+                        sps[2] == 0.toByte() && sps[3] == 1.toByte() -> 4
+                    sps.size >= 3 && sps[0] == 0.toByte() && sps[1] == 0.toByte() &&
+                        sps[2] == 1.toByte() -> 3
+                    else -> 0
+                }
+                if (sps.size - nalOffset < 4 || (sps[nalOffset].toInt() and 0x1F) != 7) return null
+                val reader = SpsBitReader(sps, startOffset = nalOffset + 1)  // skip start code and SPS header
 
                 val profileIdc = reader.readBits(8)
                 reader.readBits(8)   // constraint flags + 2 reserved zeros
