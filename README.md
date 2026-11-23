@@ -65,9 +65,9 @@ APK if you are unsure which one to choose.
 | **Not sure? Use this one** | **Universal APK** — includes all supported ABIs |
 
 Pick the universal APK if you don't know your TV's CPU. See the release notes for
-the asset filenames and installation notes. Pre-release APKs are debug-signed;
-if Android reports a signature mismatch while updating an older install, uninstall
-the old version before installing the pre-release.
+the asset filenames and installation notes. Prerelease APKs use a dedicated new
+signing certificate; uninstall an older build before installing if Android reports
+a signature mismatch.
 
 ## Install on Android TV
 
@@ -75,7 +75,7 @@ Enable **Developer options → USB debugging** on the TV, then from a computer:
 
 ```sh
 adb connect <your-tv-ip>
-adb install -r iMirror-1.0.1-rc.1-universal-debug.apk
+adb install -r iMirror-1.0.1-rc.1-universal-release.apk
 ```
 
 No computer? Use a sideloading app such as *Downloader* or *Send Files to TV* to
@@ -135,26 +135,27 @@ NDK `28.2.13676358`, and CMake `3.22.1`.
 ```sh
 git clone https://github.com/mrshyi/iMirror.git
 cd iMirror
-./gradlew assembleDebug
+./gradlew assembleRelease
 ```
 
-Gradle writes one debug APK for each supported ABI and a universal debug APK to
-`app/build/outputs/apk/debug/`. The Android APK workflow verifies and publishes
-all five packages as build artifacts. Pushing a prerelease tag such as
-`v1.0.1-rc.1` creates a GitHub prerelease containing every APK, a checksum
-manifest, and the exact source archive.
+Gradle writes one Release APK for each supported ABI and a universal Release APK
+to `app/build/outputs/apk/release/`. The Android Release APK workflow verifies
+all five packages. Non-tag CI artifacts are unsigned; prerelease tags such as
+`v1.0.1-rc.1` are signed with the dedicated prerelease key and published with a
+checksum manifest and exact source archive.
 
-On ARM64 Linux, use the **Android APKs (all ABIs)** workflow in GitHub Actions.
+On ARM64 Linux, use the **Android Release APKs (all ABIs)** workflow in GitHub Actions.
 Its x86_64 Ubuntu runner runs Google's Linux host tools and cross-compiles all
 four native architectures. Pushes, pull requests, and manual workflow runs
-produce a verified artifact containing the ABI-specific APKs, universal APK,
-checksums, and exact source revision archive. Tag builds attach those files to a
-GitHub Release. Treat artifacts from pull requests as untrusted test builds;
-prefer release assets from a trusted tag. CI checks APK contents, but TV
+produce Release-variant artifacts; non-tag artifacts are unsigned. Prerelease tag
+builds sign the APKs and attach them, checksums, and the exact source archive to
+a GitHub Release. Treat artifacts from pull requests as untrusted; use a trusted
+tag's assets for installation. CI checks APK contents, but TV
 installation and mirroring still require separate device testing.
 
-CI prerelease APKs are debug-signed. For a locally signed release build, supply a
-keystore via `KEYSTORE_PATH`, `KEYSTORE_PASSWORD`, `KEY_ALIAS` and `KEY_PASSWORD`.
+For local signing, supply a keystore via `KEYSTORE_PATH`, `KEYSTORE_PASSWORD`,
+`KEY_ALIAS` and `KEY_PASSWORD`. The CI prerelease workflow reads these credentials
+from repository Actions secrets and the base64 keystore from `RELEASE_KEYSTORE_BASE64`.
 
 ## How it works
 
