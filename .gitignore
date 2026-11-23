@@ -13,9 +13,7 @@ captures/
 *.aab
 *.ap_
 
-# ...but the prebuilt, release-signed APKs in apk/ ARE committed on purpose, so
-# anyone can install without building. See apk/README.md.
-!apk/**/*.apk
+# Generated APKs are delivered as GitHub Release assets, never checked into git.
 
 # Android Studio
 *.iws

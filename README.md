@@ -10,7 +10,7 @@ no watermark, no subscription.
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Android%20TV%20%7C%20Google%20TV%20%7C%20Fire%20TV-3ddc84)](#supported-devices)
 [![Android](https://img.shields.io/badge/Android-7.1%2B%20(API%2025)-3ddc84)](#supported-devices)
-[![Download APK](https://img.shields.io/badge/download-APK-5ac8fa)](apk/)
+[![Download APK](https://img.shields.io/badge/download-APK-5ac8fa)](https://github.com/mrshyi/iMirror/releases)
 [![Free](https://img.shields.io/badge/price-free%20forever-brightgreen)](#no-ads-no-subscription-no-catch)
 
 </div>
@@ -52,17 +52,22 @@ code whatsoever**, and it never asks for your location. It is GPL-3.0 open sourc
 
 ## Download
 
-Prebuilt, release-signed APKs are committed in **[`apk/`](apk/)** — no build required.
+Installable APKs are published as assets on the
+[GitHub Releases page](https://github.com/mrshyi/iMirror/releases). Each release
+provides separate APKs for all supported CPU architectures, plus a universal
+APK if you are unsure which one to choose.
 
 | Your device | Download |
 |---|---|
-| Most Android TV boxes & sticks, Fire TV | [`armeabi-v7a`](apk/armeabi-v7a/) |
-| Newer 4K Android TV / Google TV | [`arm64-v8a`](apk/arm64-v8a/) |
-| Intel-based TVs, ChromeOS, emulators | [`x86`](apk/x86/) · [`x86_64`](apk/x86_64/) |
-| **Not sure? Use this one** | [**`universal`**](apk/universal/) — works on everything |
+| Most Android TV boxes & sticks, Fire TV | `armeabi-v7a` APK |
+| Newer 4K Android TV / Google TV | `arm64-v8a` APK |
+| Intel-based TVs, ChromeOS, emulators | `x86` or `x86_64` APK |
+| **Not sure? Use this one** | **Universal APK** — includes all supported ABIs |
 
-Pick `universal` if you don't know your TV's CPU. See [`apk/README.md`](apk/README.md)
-for how to check.
+Pick the universal APK if you don't know your TV's CPU. See the release notes for
+the asset filenames and installation notes. Pre-release APKs are debug-signed;
+if Android reports a signature mismatch while updating an older install, uninstall
+the old version before installing the pre-release.
 
 ## Install on Android TV
 
@@ -70,7 +75,7 @@ Enable **Developer options → USB debugging** on the TV, then from a computer:
 
 ```sh
 adb connect <your-tv-ip>
-adb install -r iMirror-1.0.0-universal.apk
+adb install -r iMirror-1.0.1-rc.1-universal-debug.apk
 ```
 
 No computer? Use a sideloading app such as *Downloader* or *Send Files to TV* to
@@ -133,30 +138,30 @@ cd iMirror
 ./gradlew assembleDebug
 ```
 
-Gradle writes the ABI-specific and universal debug APKs to
-`app/build/outputs/apk/debug/`. For a 32-bit ARM Android TV, use
-`app-armeabi-v7a-debug.apk`.
+Gradle writes one debug APK for each supported ABI and a universal debug APK to
+`app/build/outputs/apk/debug/`. The Android APK workflow verifies and publishes
+all five packages as build artifacts. Pushing a prerelease tag such as
+`v1.0.1-rc.1` creates a GitHub prerelease containing every APK, a checksum
+manifest, and the exact source archive.
 
-On ARM64 Linux, use the **Android debug APK (armeabi-v7a)** workflow in GitHub
-Actions. Its x86_64 Ubuntu runner runs Google's Linux host tools and
-cross-compiles the native libraries for the TV. Pushes and pull requests
-trigger the build, and you can also select **Run workflow** in the Actions tab.
-Download `imirror-armeabi-v7a-debug-<event>-<commit>` from the run's
-**Artifacts** section; it contains the APK and the exact source revision archive.
-The APK also bundles third-party license and attribution files. Treat artifacts
-from pull requests as untrusted test builds; prefer runs from a trusted branch.
-CI checks the APK's native libraries. TV installation and mirroring require
-separate device testing.
+On ARM64 Linux, use the **Android APKs (all ABIs)** workflow in GitHub Actions.
+Its x86_64 Ubuntu runner runs Google's Linux host tools and cross-compiles all
+four native architectures. Pushes, pull requests, and manual workflow runs
+produce a verified artifact containing the ABI-specific APKs, universal APK,
+checksums, and exact source revision archive. Tag builds attach those files to a
+GitHub Release. Treat artifacts from pull requests as untrusted test builds;
+prefer release assets from a trusted tag. CI checks APK contents, but TV
+installation and mirroring still require separate device testing.
 
-For a signed release build, supply your own keystore via `KEYSTORE_PATH`,
-`KEYSTORE_PASSWORD`, `KEY_ALIAS` and `KEY_PASSWORD`.
+CI prerelease APKs are debug-signed. For a locally signed release build, supply a
+keystore via `KEYSTORE_PATH`, `KEYSTORE_PASSWORD`, `KEY_ALIAS` and `KEY_PASSWORD`.
 
 ## How it works
 
 The app advertises `_airplay._tcp` and `_raop._tcp` over mDNS, presenting itself
 as an Apple TV so senders select the mirroring protocol. Encrypted H.264 arrives
-over TCP and is decoded by `MediaCodec` directly onto a `SurfaceView` with no
-intermediate copy.
+over TCP and is decoded by `MediaCodec` directly onto a `TextureView`-backed
+surface.
 
 > **Contributor note:** the two mDNS registrations **must** stay serialized.
 > Android's `NsdManager` cannot hold two registrations in flight — the second
