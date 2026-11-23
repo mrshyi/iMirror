@@ -20,11 +20,25 @@ object StreamStats {
     @Volatile var videoFps = 0         // frames/sec over the last sample window
     @Volatile var videoQueue = 0       // current decode-queue depth
     @Volatile var videoDropPct = 0     // cumulative % of frames dropped under load
+    @Volatile var videoPayloads = 0
+    @Volatile var videoAvccEmpty = 0
+    @Volatile var videoQueueDrops = 0
+    @Volatile var videoKeyframeSkips = 0
+    @Volatile var videoNoDecoderSkips = 0
+    @Volatile var videoInputSubmitted = 0
+    @Volatile var videoInputMisses = 0
+    @Volatile var videoOutputReleased = 0
+    @Volatile var videoCodecErrors = 0
 
     // Actual decoded video dimensions (from the SPS, so portrait phone streams are portrait here).
     // StreamingScreen reads these to aspect-fit the Surface instead of stretching to 16:9.
     @Volatile var videoWidth = 0
     @Volatile var videoHeight = 0
+    @Volatile var videoRotation = 0
+    @Volatile var videoConfig = "—"     // parsed SPS versus configured size hint
+    @Volatile var videoOutputGeometry = "—"
+    @Volatile var surfaceSize = "—"      // container and SurfaceView bounds/position
+    @Volatile var surfaceBuffer = "—"    // Surface frame and display metrics
 
     // ─── Audio (AudioStreamServer) ───────────────────────────────────────────
     @Volatile var audioActive = false  // true while an audio stream is running
@@ -34,13 +48,33 @@ object StreamStats {
     /** Clears per-stream counters (call when a mirror session ends). Keeps [overlayEnabled]. */
     fun resetStreams() {
         videoRes = ""; videoFps = 0; videoQueue = 0; videoDropPct = 0
-        videoWidth = 0; videoHeight = 0
+        videoWidth = 0; videoHeight = 0; videoRotation = 0
+        videoConfig = "—"; videoOutputGeometry = "—"
+        surfaceSize = "—"; surfaceBuffer = "—"
+        resetVideoDiagnostics()
         audioActive = false; audioQueue = 0; audioDupPct = 0
+    }
+
+    /** Reset counters for a fresh video stream without touching audio counters. */
+    fun resetVideoDiagnostics() {
+        videoPayloads = 0; videoAvccEmpty = 0; videoQueueDrops = 0
+        videoKeyframeSkips = 0; videoNoDecoderSkips = 0
+        videoInputSubmitted = 0; videoInputMisses = 0
+        videoOutputReleased = 0; videoCodecErrors = 0
     }
 
     /** Human-readable multi-line HUD text. */
     fun summary(): String =
         "iMirror · debug\n" +
         "VIDEO  ${videoRes.ifEmpty { "—" }}   ${videoFps} fps   q ${videoQueue}   drop ${videoDropPct}%\n" +
+        "OUTPUT ${videoWidth}x${videoHeight}   rot ${videoRotation}°\n" +
+        "CONFIG $videoConfig\n" +
+        "GEOM   $videoOutputGeometry\n" +
+        "SURFACE $surfaceSize\n" +
+        "BUFFER $surfaceBuffer\n" +
+        "PIPE rx=$videoPayloads avccEmpty=$videoAvccEmpty qDrop=$videoQueueDrops " +
+            "keySkip=$videoKeyframeSkips noDecoder=$videoNoDecoderSkips\n" +
+        "CODEC in=$videoInputSubmitted inputMiss=$videoInputMisses " +
+            "out=$videoOutputReleased errors=$videoCodecErrors\n" +
         "AUDIO  " + (if (audioActive) "on   q ${audioQueue}   dup ${audioDupPct}%" else "off")
 }

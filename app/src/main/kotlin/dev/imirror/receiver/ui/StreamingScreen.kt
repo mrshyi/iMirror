@@ -7,9 +7,9 @@ import android.os.Handler
 import android.os.Looper
 import android.util.AttributeSet
 import android.view.Gravity
-import android.view.SurfaceHolder
-import android.view.SurfaceView
 import android.view.Surface
+import android.graphics.SurfaceTexture
+import android.view.TextureView
 import android.widget.FrameLayout
 import android.widget.TextView
 import dev.imirror.receiver.airplay.StreamStats
@@ -19,9 +19,8 @@ import dev.imirror.receiver.util.Logger
  * StreamingScreen — Full-screen view that displays the AirPlay video stream.
  *
  * WHY: The decoded video from MediaCodec must be rendered to a [Surface].
- * A [SurfaceView] provides a dedicated, hardware-accelerated drawing surface
- * that can receive MediaCodec output directly — no intermediate bitmap copies.
- * This is the lowest-latency way to display video on Android.
+ * A [TextureView] composites MediaCodec output as part of the Activity window,
+ * avoiding a separate SurfaceView window during task transitions.
  *
  * HOW: Add this view to the streaming_container in activity_main.xml.
  * Call [getSurface] to get the Surface to pass to [VideoDecoder.initialize].
@@ -44,11 +43,37 @@ class StreamingScreen @JvmOverloads constructor(
     defStyleAttr: Int = 0
 ) : FrameLayout(context, attrs, defStyleAttr) {
 
-    // The SurfaceView that provides the hardware-accelerated rendering surface
-    private val surfaceView: SurfaceView = SurfaceView(context)
+    // TextureView content participates in the Activity window composition.
+    private val textureView: TextureView = TextureView(context)
 
-    // The Surface is created asynchronously by SurfaceView — stored here when ready
+    // MediaCodec writes into a Surface backed by the TextureView's SurfaceTexture.
     private var surface: Surface? = null
+    private var activeSurfaceTexture: SurfaceTexture? = null
+
+    private val surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+        override fun onSurfaceTextureAvailable(texture: SurfaceTexture, width: Int, height: Int) {
+            activeSurfaceTexture = texture
+            surface = Surface(texture)
+            Logger.d("StreamingScreen: TextureView surface available ${width}x${height}")
+        }
+
+        override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) {
+            Logger.d("StreamingScreen: TextureView surface changed ${width}x${height}")
+        }
+
+        override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean {
+            if (activeSurfaceTexture === texture) {
+                val oldSurface = surface
+                surface = null
+                activeSurfaceTexture = null
+                oldSurface?.release()
+            }
+            Logger.d("StreamingScreen: TextureView surface destroyed")
+            return true
+        }
+
+        override fun onSurfaceTextureUpdated(texture: SurfaceTexture) = Unit
+    }
 
     // Optional debug HUD (Settings → "Debug overlay"), drawn on top of the video.
     private val debugView = TextView(context).apply {
@@ -67,6 +92,15 @@ class StreamingScreen @JvmOverloads constructor(
     private val tick = object : Runnable {
         override fun run() {
             applyAspectFit()
+            val containerLocation = IntArray(2)
+            getLocationOnScreen(containerLocation)
+            StreamStats.surfaceSize =
+                "container=${width}x${height}@${containerLocation[0]},${containerLocation[1]} " +
+                    "view=${textureView.width}x${textureView.height}@${textureView.left},${textureView.top}"
+            val metrics = resources.displayMetrics
+            StreamStats.surfaceBuffer =
+                "texture=${textureView.width}x${textureView.height} " +
+                    "display=${metrics.widthPixels}x${metrics.heightPixels} rot=${display?.rotation ?: -1}"
             if (StreamStats.overlayEnabled) {
                 debugView.visibility = VISIBLE
                 debugView.text = StreamStats.summary()
@@ -78,43 +112,22 @@ class StreamingScreen @JvmOverloads constructor(
     }
 
     init {
-        // Black backing so the letterbox/pillarbox bars (when the video is sized to its aspect ratio
-        // and doesn't fill 16:9) are black — without this, those margins are transparent and the home
-        // menu shows through behind the streaming overlay. The SurfaceView punches its own hole on top.
+        // Black backing keeps letterbox/pillarbox bars black.
         setBackgroundColor(Color.BLACK)
 
-        // SurfaceView is centred; its size is set to the video's aspect ratio by applyAspectFit().
-        addView(surfaceView, LayoutParams(
+        // TextureView is centred and aspect-fit by resizing its view bounds.
+        textureView.surfaceTextureListener = surfaceTextureListener
+        addView(textureView, LayoutParams(
             LayoutParams.MATCH_PARENT,
             LayoutParams.MATCH_PARENT
         ).apply { gravity = Gravity.CENTER })
 
-        // Debug HUD overlay, top-left, above the video surface.
+        // Debug HUD overlay, top-right, above the video surface.
         addView(debugView, LayoutParams(
             LayoutParams.WRAP_CONTENT,
             LayoutParams.WRAP_CONTENT
-        ).apply { gravity = Gravity.TOP or Gravity.START; topMargin = 48; leftMargin = 48 })
+        ).apply { gravity = Gravity.TOP or Gravity.RIGHT; topMargin = 48; rightMargin = 48 })
 
-        // Register a callback to track when the Surface is created/destroyed
-        surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
-            override fun surfaceCreated(holder: SurfaceHolder) {
-                // Surface is now ready — store reference for VideoDecoder
-                surface = holder.surface
-                Logger.d("StreamingScreen: Surface created")
-            }
-
-            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-                // Called when the surface size changes (e.g., resolution change)
-                // MediaCodec handles this automatically — no action needed here
-                Logger.d("StreamingScreen: Surface changed ${width}x${height}")
-            }
-
-            override fun surfaceDestroyed(holder: SurfaceHolder) {
-                // Surface is gone (e.g., screen turned off) — VideoDecoder must stop
-                surface = null
-                Logger.d("StreamingScreen: Surface destroyed")
-            }
-        })
     }
 
     /**
@@ -129,7 +142,7 @@ class StreamingScreen @JvmOverloads constructor(
     fun getSurface(): Surface? = surface
 
     /**
-     * Sizes the SurfaceView to the decoded video's aspect ratio (letterbox/pillarbox) instead of
+     * Sizes the TextureView to the decoded video's aspect ratio (letterbox/pillarbox) instead of
      * stretching it to fill 16:9. Without this, a portrait phone stream is squashed horizontally.
      * Falls back to filling the container when the size isn't known yet.
      */
@@ -149,7 +162,7 @@ class StreamingScreen @JvmOverloads constructor(
         if (targetW == lastSurfaceW && targetH == lastSurfaceH) return
         lastSurfaceW = targetW
         lastSurfaceH = targetH
-        surfaceView.layoutParams = (surfaceView.layoutParams as LayoutParams).apply {
+        textureView.layoutParams = (textureView.layoutParams as LayoutParams).apply {
             width = targetW; height = targetH; gravity = Gravity.CENTER
         }
     }

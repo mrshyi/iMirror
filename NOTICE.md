@@ -8,6 +8,11 @@ v3.0** (see [LICENSE](LICENSE)). GPL-3.0 was not an arbitrary pick — it is the
 strongest license present in the dependency graph, and the FairPlay component
 below makes it mandatory for the combined work.
 
+The full Apache License 2.0 text is included in [`LICENSES/Apache-2.0.txt`](LICENSES/Apache-2.0.txt)
+and packaged in the APK at `assets/licenses/Apache-2.0.txt`. This notice is also
+packaged at `assets/licenses/NOTICE.md` so binary recipients receive the relevant
+attribution information with the application.
+
 ---
 
 ## 1. playfair — GNU GPL

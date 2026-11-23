@@ -22,12 +22,12 @@ import org.robolectric.annotation.Config
  *
  * WHAT WE TEST:
  * - [ServiceController.start] dispatches ACTION_START to MirrorService
- * - [ServiceController.stop] dispatches ACTION_STOP to MirrorService
+ * - [ServiceController.stop] stops MirrorService
  * - [ServiceController.restart] dispatches ACTION_RESTART to MirrorService
  * - Intent target component is MirrorService
  *
  * HOW: Context is mocked with MockK. We capture the Intent passed to
- * startForegroundService / startService and assert its action and target.
+ * startForegroundService / stopService and assert the command and target.
  *
  * NOTE: ServiceController uses Context.startForegroundService (API 26+) or
  * Context.startService (API < 26) — no AndroidX dependency.
@@ -57,14 +57,14 @@ class ServiceControllerTest {
     }
 
     @Test
-    fun `stop() sends ACTION_STOP intent via startService`() {
+    fun `stop() targets MirrorService via stopService`() {
         val stopSlot = slot<Intent>()
-        every { context.startService(capture(stopSlot)) } returns mockk()
+        every { context.stopService(capture(stopSlot)) } returns true
 
         ServiceController.stop(context)
 
-        verify { context.startService(any()) }
-        assertEquals(MirrorService.ACTION_STOP, stopSlot.captured.action)
+        verify { context.stopService(any()) }
+        assertEquals(MirrorService::class.java.name, stopSlot.captured.component?.className)
     }
 
     @Test

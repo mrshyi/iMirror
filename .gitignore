@@ -13,9 +13,7 @@ captures/
 *.aab
 *.ap_
 
-# ...but the prebuilt, release-signed APKs in apk/ ARE committed on purpose, so
-# anyone can install without building. See apk/README.md.
-!apk/**/*.apk
+# Generated APKs are delivered as GitHub Release assets, never checked into git.
 
 # Android Studio
 *.iws
@@ -40,8 +38,12 @@ release.env
 # Local configuration files
 local.defaults.properties
 
-# Generated files
-app/src/main/assets/
+# Generated assets, except the third-party notices distributed with the APK
+app/src/main/assets/*
+!app/src/main/assets/licenses/
+app/src/main/assets/licenses/*
+!app/src/main/assets/licenses/Apache-2.0.txt
+!app/src/main/assets/licenses/NOTICE.md
 
 # macOS
 .DS_Store

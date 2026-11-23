@@ -1,18 +1,15 @@
 package dev.imirror.receiver
 
-import android.content.ComponentName
-import android.content.Context
 import android.content.Intent
-import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
-import android.os.IBinder
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import android.view.View
 import android.widget.FrameLayout
 import android.widget.TextView
+import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
@@ -27,7 +24,9 @@ import dev.imirror.receiver.ui.PhotoScreen
 import dev.imirror.receiver.ui.PinScreen
 import dev.imirror.receiver.ui.SettingsFragment
 import dev.imirror.receiver.ui.StreamingScreen
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import timber.log.Timber
 
@@ -63,33 +62,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var nowPlayingScreen: NowPlayingScreen
     private lateinit var pinScreen: PinScreen
 
-    // Service binding — gives access to state flows for showing/hiding the streaming overlay
-    private var service: MirrorService? = null
-    private var isBound = false
+    private var overlayObserver: Job? = null
     private var currentAirPlayState = ProtocolState.DISABLED
-    private var currentPhotoFrame: PhotoFrame? = null
     private var currentNowPlaying: NowPlayingInfo? = null
-    private var currentPin: String? = null
-
-    private val serviceConnection = object : ServiceConnection {
-        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
-            service = (binder as? MirrorService.LocalBinder)?.getService()
-            isBound = true
-            Timber.d("MainActivity: bound to MirrorService")
-
-            // Wire the streaming Surface so the service can pass it to VideoDecoder
-            service?.setVideoSurfaceProvider { getVideoSurface() }
-
-            // Show/hide the full-screen overlay for video streams and photos.
-            observeOverlayState()
-        }
-
-        override fun onServiceDisconnected(name: ComponentName?) {
-            service = null
-            isBound = false
-            Timber.d("MainActivity: unbound from MirrorService")
-        }
-    }
+    private var videoOverlayWasActive = false
+    private var leavingForLauncher = false
+    private var stopVideoSessionWhenStopped = false
 
     // Currently selected nav item index (0 = Home, 1 = Settings)
     private var selectedNavIndex = 0
@@ -97,6 +75,10 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() = exitToTvLauncher()
+        })
 
         Timber.d("MainActivity created")
         bindViews()
@@ -117,34 +99,28 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
-        // Bind so we can observe StateFlows and supply the video Surface
-        val intent = Intent(this, MirrorService::class.java)
-        bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
+        leavingForLauncher = false
+        stopVideoSessionWhenStopped = false
+        overlayObserver = lifecycleScope.launch { observeOverlayState() }
     }
 
     override fun onStop() {
+        overlayObserver?.cancel()
+        overlayObserver = null
         super.onStop()
-        // Clear surface reference before unbinding to avoid holding a dead Surface
-        service?.setVideoSurfaceProvider { null }
-        if (isBound) {
-            unbindService(serviceConnection)
-            isBound = false
+        if (stopVideoSessionWhenStopped) {
+            stopVideoSessionWhenStopped = false
+            videoOverlayWasActive = false
+            MirrorService.runningService.value?.stopCurrentAirPlaySession()
         }
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        // A user-initiated exit (Back out of the app) should end any active mirror — closing the
-        // service stops the receiver, which drops the RTSP connection so the sender stops mirroring
-        // too. isFinishing distinguishes a real exit from a config-change recreation (where the
-        // service must keep running). Backgrounding via Home goes through onStop only (no destroy),
-        // so the receiver keeps advertising for a quick return.
-        if (isFinishing) {
-            Timber.d("MainActivity finishing — stopping service so mirroring doesn't linger")
-            ServiceController.stop(this)
-        } else {
-            Timber.d("MainActivity destroyed (recreation) — leaving service running")
+    override fun onUserLeaveHint() {
+        if (!leavingForLauncher) {
+            leavingForLauncher = true
+            stopVideoSessionForExit()
         }
+        super.onUserLeaveHint()
     }
 
     // ─── View Setup ──────────────────────────────────────────────────────────
@@ -234,6 +210,7 @@ class MainActivity : AppCompatActivity() {
      * Hides the nav panel and content area to give the stream the full screen.
      */
     fun showStreamingScreen() {
+        videoOverlayWasActive = true
         photoScreen.visibility = View.GONE
         nowPlayingScreen.visibility = View.GONE
         nowPlayingScreen.clear()
@@ -245,6 +222,7 @@ class MainActivity : AppCompatActivity() {
 
     fun showPhotoScreen(photoFrame: PhotoFrame) {
         if (photoScreen.showPhoto(photoFrame.bytes)) {
+            videoOverlayWasActive = false
             streamingScreen.visibility = View.GONE
             nowPlayingScreen.visibility = View.GONE
             pinScreen.visibility = View.GONE
@@ -256,6 +234,7 @@ class MainActivity : AppCompatActivity() {
 
     /** Shows the audio-only now-playing card (AirPlay audio with no video). */
     fun showNowPlayingScreen(info: NowPlayingInfo) {
+        videoOverlayWasActive = false
         nowPlayingScreen.update(info)
         streamingScreen.visibility = View.GONE
         photoScreen.visibility = View.GONE
@@ -288,6 +267,10 @@ class MainActivity : AppCompatActivity() {
      * false for other keys so normal navigation is unaffected.
      */
     override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent?): Boolean {
+        if (keyCode == android.view.KeyEvent.KEYCODE_ESCAPE) {
+            exitToTvLauncher()
+            return true
+        }
         val overlayActive = currentNowPlaying != null || currentAirPlayState == ProtocolState.CONNECTED
         if (overlayActive) {
             val command = when (keyCode) {
@@ -304,11 +287,40 @@ class MainActivity : AppCompatActivity() {
                 else -> null
             }
             if (command != null) {
-                service?.sendAirPlayRemoteCommand(command)
+                MirrorService.runningService.value?.sendAirPlayRemoteCommand(command)
                 return true
             }
         }
         return super.onKeyDown(keyCode, event)
+    }
+
+    private fun exitToTvLauncher() {
+        if (leavingForLauncher) return
+        leavingForLauncher = true
+        stopVideoSessionForExit()
+        returnToTvLauncher()
+    }
+
+    private fun stopVideoSessionForExit() {
+        if (!videoOverlayWasActive) return
+        // Let the system finish the HOME/task transition while the last video frame is still
+        // rendered. Close RTSP only after this Activity is no longer visible in onStop().
+        stopVideoSessionWhenStopped = true
+    }
+
+    /** Open the TV launcher directly instead of finishing into the black window background. */
+    private fun returnToTvLauncher() {
+        val homeIntent = Intent(Intent.ACTION_MAIN).apply {
+            addCategory(Intent.CATEGORY_HOME)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION)
+        }
+        try {
+            startActivity(homeIntent)
+            overridePendingTransition(0, 0)
+        } catch (e: Exception) {
+            Timber.w(e, "Could not launch TV home; moving iMirror task to background")
+            moveTaskToBack(true)
+        }
     }
 
     /**
@@ -336,45 +348,46 @@ class MainActivity : AppCompatActivity() {
 
     // ─── Streaming overlay ────────────────────────────────────────────────────
 
-    /**
-     * Observes [MirrorService.airPlayState] and [MirrorService.photoFrame]
-     * and shows the appropriate full-screen overlay.
-     *
-     * Called once after the service is bound. The coroutine is automatically cancelled
-     * by [lifecycleScope] when the Activity stops.
-     */
-    private fun observeOverlayState() {
-        val svc = service ?: return
-        lifecycleScope.launch {
-            svc.airPlayState.collectLatest { state ->
-                currentAirPlayState = state
-                updateOverlay()
+    private data class OverlayState(
+        val protocol: ProtocolState,
+        val photo: PhotoFrame?,
+        val nowPlaying: NowPlayingInfo?,
+        val pin: String?
+    )
+
+    private suspend fun observeOverlayState() {
+        MirrorService.runningService.collectLatest { service ->
+            if (service == null) {
+                currentAirPlayState = ProtocolState.DISABLED
+                currentNowPlaying = null
+                updateOverlay(photoFrame = null, pin = null)
+                return@collectLatest
             }
-        }
-        lifecycleScope.launch {
-            svc.photoFrame.collectLatest { frame ->
-                currentPhotoFrame = frame
-                updateOverlay()
-            }
-        }
-        lifecycleScope.launch {
-            svc.nowPlaying.collectLatest { info ->
-                currentNowPlaying = info
-                updateOverlay()
-            }
-        }
-        lifecycleScope.launch {
-            svc.pairingPin.collectLatest { pin ->
-                currentPin = pin
-                updateOverlay()
+
+            val surfaceProvider = ::getVideoSurface
+            service.setVideoSurfaceProvider(surfaceProvider)
+            try {
+                combine(
+                    service.airPlayState, service.photoFrame, service.nowPlaying, service.pairingPin,
+                    ::OverlayState
+                ).collect { overlay ->
+                    currentAirPlayState = overlay.protocol
+                    currentNowPlaying = overlay.nowPlaying
+                    updateOverlay(overlay.photo, overlay.pin)
+                }
+            } finally {
+                service.clearVideoSurfaceProvider(surfaceProvider)
             }
         }
     }
 
-    private fun updateOverlay() {
-        val photoFrame = currentPhotoFrame
+    private fun updateOverlay(photoFrame: PhotoFrame?, pin: String?) {
+        // Keep the last visible overlay in place until the launcher covers this Activity.
+        // Closing RTSP changes the observed state immediately; hiding the overlay first exposes
+        // the iMirror home UI for a frame during the task transition.
+        if (leavingForLauncher) return
+
         val nowPlaying = currentNowPlaying
-        val pin = currentPin
         when {
             // PIN pairing (access control) happens before streaming — show the code over everything.
             pin != null -> showPinScreen(pin)
@@ -383,12 +396,18 @@ class MainActivity : AppCompatActivity() {
             nowPlaying != null -> showNowPlayingScreen(nowPlaying)
             currentAirPlayState == ProtocolState.CONNECTED -> showStreamingScreen()
             photoFrame != null -> showPhotoScreen(photoFrame)
-            else -> hideStreamingScreen()
+            else -> {
+                val returnToHome = videoOverlayWasActive
+                videoOverlayWasActive = false
+                hideStreamingScreen()
+                if (returnToHome) returnToTvLauncher()
+            }
         }
     }
 
     /** Shows the AirPlay pairing PIN over the full screen during SRP pair-setup. */
     fun showPinScreen(pin: String) {
+        videoOverlayWasActive = false
         pinScreen.setPin(pin)
         streamingScreen.visibility = View.GONE
         photoScreen.visibility = View.GONE
