@@ -4,6 +4,8 @@
 
 # iMirror — AirPlay Screen Mirroring for Android TV
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 **Mirror your iPhone, iPad, or MacBook to any Android TV.** No Apple TV, no ads,
 no watermark, no subscription.
 
